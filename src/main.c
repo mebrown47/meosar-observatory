@@ -20,10 +20,11 @@
 #include "fgb_demod.h"
 #include "input.h"
 #include "out.h"
+#include "sgb_rx.h"
 
 #define D1 20
 #define PRE 0.3
-#define POST 0.9
+#define POST 1.3   // a whole SGB burst (1.0 s) must fit after the block end
 
 typedef struct {
 	const char *name;
@@ -50,6 +51,8 @@ static void usage(void) {
 	        "  --bands LIST     galileo,glonass (default), quiet = noise-only test band\n"
 	        "  --thr DB         detector threshold (13)    --L N  Chase order (10, 0 = hard)\n"
 	        "  --no-combine     no relay combining         --no-llr  leave soft bits out of records\n"
+	        "  --no-sgb         FGB only                   --sgb-threads N (4)  --sgb-span HZ (8000)\n"
+	        "  --sgb-thr Z (19) acquisition threshold      --sgb-prez Z (7) preamble threshold\n"
 	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n");
 }
 
@@ -102,13 +105,43 @@ static void emit(const fgb_rec_t *r, const fgb_rec_t *all, double t0_ms, int wit
 	jb_free(&b);
 }
 
+static void emit_sgb(const sgb_rec_t *r, double t0_ms) {
+	jbuf_t b = {0};
+	char hex[64] = "";
+	if (r->ok || r->reasons[0]) sgb_hex(r->bits, hex);
+	jb_printf(&b, "{\"kind\": \"sgb\", \"t\": %.6f, \"band\": \"%s\", \"f_hz\": %.1f, \"relays\": [", r->t, r->band, r->f_hz);
+	for (int k = 0; k < r->nrelay; k++)
+		jb_printf(&b, "%s{\"f_hz\": %.1f, \"dt_ms\": %.2f, \"ebn0\": %.2f, \"pre_z\": %.1f, \"alone\": %s}", k ? ", " : "",
+		          r->rf[k], r->rdt_ms[k], r->reb[k], r->rpz[k], r->ralone[k] ? "true" : "false");
+	jb_printf(&b, "], \"ok\": %s, \"how\": \"", r->ok ? "true" : "false");
+	if (r->hard) jb_printf(&b, "hard %d errors", r->nerr);
+	else if (r->flips >= 0) jb_printf(&b, "chase %d flips", r->flips);
+	else jb_raw(&b, "fail");
+	jb_printf(&b, "\", \"hex\": \"%s\", \"accept\": \"%s\", \"reasons\": ", hex, tier(r->accept));
+	jb_str(&b, r->reasons);
+	if (t0_ms > 0) {
+		double ms = t0_ms + r->t * 1000;
+		time_t sec = (time_t)(ms / 1000);
+		struct tm tm;
+		gmtime_r(&sec, &tm);
+		char ts[40];
+		strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tm);
+		jb_printf(&b, ", \"utc\": \"%s.%03d+00:00\"", ts, (int)fmod(ms, 1000));
+	}
+	jb_raw(&b, "}");
+	out_emit(b.s);
+	jb_free(&b);
+}
+
 int main(int argc, char **argv) {
 	const char *inspec = NULL, *fmt = NULL, *gain = NULL, *bands_s = "galileo,glonass";
 	double center = 1544.5e6, rate = 2.5e6, start = 0, dur = -1, thr = 13;
-	int L = 10, combine = 1, bias = 0, quiet = 0, with_llr = 1;
+	int L = 10, combine = 1, bias = 0, quiet = 0, with_llr = 1, do_sgb = 1, sgb_threads = 4;
+	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7;
 	static struct option lo[] = {
 		{"start", 1, 0, 1}, {"dur", 1, 0, 2}, {"bands", 1, 0, 3}, {"thr", 1, 0, 4}, {"L", 1, 0, 5},
-		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"no-sgb", 0, 0, 8}, {"sgb-threads", 1, 0, 9},
+		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
 	int o;
 	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qh", lo, NULL)) != -1) {
 		switch (o) {
@@ -127,6 +160,11 @@ int main(int argc, char **argv) {
 		case 5: L = atoi(optarg); break;
 		case 6: combine = 0; break;
 		case 7: with_llr = 0; break;
+		case 8: do_sgb = 0; break;
+		case 9: sgb_threads = atoi(optarg); break;
+		case 10: sgb_span = atof(optarg); break;
+		case 11: sgb_thr = atof(optarg); break;
+		case 12: sgb_prez = atof(optarg); break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
@@ -163,8 +201,11 @@ int main(int argc, char **argv) {
 		b->cs = chan_stream_new(fs, b->mid - fc, D1, (b->hi - b->lo) * 1.05);
 		nb++;
 	}
-	fprintf(stderr, "meosar-rx: %s, %.0f S/s at %.4f MHz, %d band(s), threshold %.1f dB, Chase L=%d%s\n",
-	        in->name, fs, fc / 1e6, nb, thr, L, combine ? ", relay combining" : "");
+	fprintf(stderr, "meosar-rx: %s, %.0f S/s at %.4f MHz, %d band(s), threshold %.1f dB, Chase L=%d%s%s\n",
+	        in->name, fs, fc / 1e6, nb, thr, L, combine ? ", relay combining" : "", do_sgb ? ", SGB" : "");
+	sgb_acq_t *acq = do_sgb ? sgb_acq_new(f1, sgb_span, sgb_threads) : NULL;
+	sgb_rec_t *srecs = malloc(sizeof(sgb_rec_t) * 256);
+	long long n_sgb = 0;
 
 	// skip to --start
 	const int CH = 65536;
@@ -231,6 +272,14 @@ int main(int argc, char **argv) {
 				emit(&recs[k], recs + first, in->start_ms, with_llr);
 				n_acc += recs[k].accept > 0;
 			}
+			if (acq) {
+				int ns = sgb_process_block(acq, b->buf, b->len, f1, b->mid, t_y0, t_block, t_stop, sgb_thr, sgb_prez, srecs, 256);
+				for (int k = 0; k < ns; k++) {
+					srecs[k].band = b->name;
+					emit_sgb(&srecs[k], in->start_ms);
+					n_sgb += srecs[k].accept > 0;
+				}
+			}
 		}
 		// advance and trim
 		t_block = t_stop;
@@ -247,7 +296,7 @@ int main(int argc, char **argv) {
 			}
 		}
 		double cpu = (double)(clock() - tic) / CLOCKS_PER_SEC;
-		fprintf(stderr, "[%7.1f s] candidates %lld accepted %lld  cpu %.2fx real time%s\n", t_block, n_cand, n_acc,
+		fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, SGB accepted %lld  cpu %.2fx real time%s\n", t_block, n_cand, n_acc, n_sgb,
 		        cpu > 0 ? (t_block - start) / cpu : 0, input_dropped ? "  (dropped samples)" : "");
 		if (eof) break;
 	}
