@@ -54,6 +54,11 @@
   <span class="status" id="status">loading…</span>
 </header>
 <main>
+  <div class="panel" id="fullbanner" style="display:none;border-color:#6b2226;background:#2a1215">
+    <h2 style="color:var(--bad)">Local view, full detail</h2>
+    <div>Every beacon is identified here, operational ones included, with decoded fields and positions. Some may be real distress beacons.
+    This page listens on 127.0.0.1 only: do not forward it, share it or copy its contents to the public pages.</div>
+  </div>
   <div class="tiles" id="tiles"></div>
   <div class="grid">
     <div>
@@ -66,7 +71,7 @@
       <div class="panel"><h2>Build progress</h2><ul class="prog" id="prog"></ul></div>
     </div>
   </div>
-  <div class="panel"><h2>Orbitography and test beacons <span class="hint" id="bhint"></span></h2><div id="beacons"></div></div>
+  <div class="panel"><h2><span id="btitle">Orbitography and test beacons</span> <span class="hint" id="bhint"></span></h2><div id="beacons"></div></div>
   <div class="panel"><h2>Second-generation (SGB) bursts <span class="hint" id="shint"></span></h2><div id="sgb"></div></div>
   <div class="panel"><h2>Scoreboard: synthetic bursts in real feeder noise <span class="hint">share of 40 bursts decoded, by C/N0</span></h2><div id="score"></div></div>
 </main>
@@ -80,7 +85,8 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const t = s => s ? esc(s.replace("T", " ").replace(/\.\d+\+00:00$/, "").replace("+00:00", "")) + " UTC" : "—";
 const ago = secs => secs < 90 ? `${secs} s` : secs < 5400 ? `${Math.round(secs / 60)} min` : `${(secs / 3600).toFixed(1)} h`;
-const CLASS = {orbitography: ["acc", "orbitography"], test: ["warn", "test"]};
+const CLASS = {orbitography: ["acc", "orbitography"], test: ["warn", "test"], operational: ["bad", "operational"]};
+const fields = f => f && f.length ? `<div class="mono dim" style="white-space:pre-wrap;margin-top:3px">${f.map(esc).join("\n")}</div>` : "";
 
 function tiles(s) {
   const T = s.totals;
@@ -149,13 +155,13 @@ function prog(s) {
 
 function beacons(s) {
   const B = s.beacons;
-  $("bhint").textContent = `${B.length} shown · ${s.totals.operational} operational-type beacons counted only`;
+  $("bhint").textContent = s.full ? `${B.length} beacons, all shown (local view)` : `${B.length} shown · ${s.totals.operational} operational-type beacons counted only`;
   if (!B.length) { $("beacons").innerHTML = `<p class="dim">None yet.</p>`; return; }
   const maxb = Math.max(...B.map(b => b.bursts));
   $("beacons").innerHTML = `<table><tr><th>Beacon ID</th><th>Type</th><th class="r">Country</th><th>Bursts</th><th class="r">Best Eb/N0</th><th class="r">Relays</th><th>First heard</th><th>Last heard</th></tr>` +
     B.map(b => {
       const [c, l] = CLASS[b.class] || ["dim", b.class];
-      return `<tr><td class="mono">${esc(b.id)}</td><td><span class="pill ${c}">${l}</span>${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td><td class="r">${b.country}</td>` +
+      return `<tr><td class="mono">${esc(b.id)}${fields(b.fields)}</td><td><span class="pill ${c}">${l}</span>${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td><td class="r">${b.country}</td>` +
         `<td><span class="bar" style="width:${Math.max(3, b.bursts / maxb * 120)}px"></span> <span class="dim">${b.bursts}</span></td>` +
         `<td class="r">${b.ebn0_max.toFixed(1)} dB</td><td class="r">${b.relays_max}</td><td class="dim">${t(b.first)}</td><td class="dim">${t(b.last)}</td></tr>`;
     }).join("") + `</table>`;
@@ -163,10 +169,10 @@ function beacons(s) {
 
 function sgb(s) {
   const S = s.sgb;
-  $("shint").textContent = `${S.length} test-protocol bursts shown · ${s.sgb_operational} others counted only`;
+  $("shint").textContent = s.full ? `${S.length} bursts, all shown (local view)` : `${S.length} test-protocol bursts shown · ${s.sgb_operational} others counted only`;
   if (!S.length) { $("sgb").innerHTML = `<p class="dim">None decoded yet.</p>`; return; }
   $("sgb").innerHTML = `<table><tr><th>Time</th><th class="r">TAC</th><th class="r">Serial</th><th class="r">Country</th><th class="r">Relays</th><th>Relay Eb/N0</th><th>Decode</th></tr>` +
-    S.map(x => `<tr><td class="dim">${t(x.utc)}</td><td class="r">${x.tac}</td><td class="r">${x.serial}</td><td class="r">${x.country}</td><td class="r">${x.relays}</td>` +
+    S.map(x => `<tr><td class="dim">${t(x.utc)}${fields(x.fields)}</td><td class="r">${x.tac}</td><td class="r">${x.serial}</td><td class="r">${x.country}</td><td class="r">${x.relays}</td>` +
       `<td class="mono">${x.ebn0.map(e => (e ?? 0).toFixed(1)).join(" · ")} dB</td><td><span class="pill sgb">${esc(x.how)}</span>${x.alone ? "" : ' <span class="dim">combined only</span>'}</td></tr>`).join("") + `</table>`;
 }
 
@@ -184,7 +190,13 @@ async function refresh() {
   try {
     const r = await fetch("api/state", {cache: "no-store"});
     const s = await r.json();
-    $("station").textContent = s.station;
+    $("station").textContent = s.station + (s.full ? " · local full view" : "");
+    $("fullbanner").style.display = s.full ? "" : "none";
+    $("btitle").textContent = s.full ? "All first-generation beacons" : "Orbitography and test beacons";
+    if (s.full) {
+      document.title = "LOCAL · MEOSAR full detail";
+      document.querySelector("footer").textContent = "Local full view on 127.0.0.1. Operational beacons are shown in full here and must not be published.";
+    }
     tiles(s); rec(s); datasets(s); timeline(s); sats(s); prog(s); beacons(s); sgb(s); score(s);
     $("status").textContent = `updated ${s.generated.slice(11, 19)} UTC`;
   } catch (e) {

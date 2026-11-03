@@ -3,6 +3,7 @@
 """meosar-rx dashboard: results and build progress from the files the pipeline writes.
 
     server.py [--config dash.json] [--port 8896] [--host 0.0.0.0]
+    server.py --full [--port 8897]        full detail, loopback only (reach it by SSH tunnel)
 
 The page is meant to be reachable from outside, so it shows full detail only for beacons that
 are not operational: orbitography (calibration), test protocols and self-test transmissions.
@@ -28,6 +29,30 @@ CACHE_S = 15
 _cache = {"t": 0.0, "state": None}
 _lock = threading.Lock()
 MIDS: set[int] = set()
+FULL = False
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+_decoded: dict[str, list[str]] = {}
+KEEP = ("Protocol", "Country", "Hex ID", "23 Hex ID", "Identification", "Type", "TAC", "Serial",
+        "MMSI", "Aircraft", "Vessel", "Position", "Latitude", "Longitude", "Orbitography ID",
+        "UTC time", "Test Protocol", "Homing", "Frame Mode")
+
+
+def decode_fields(hexs: str, cfg) -> list[str]:
+    """Field text from dec406's hex decoder (full mode only; cached per frame)."""
+    if hexs in _decoded:
+        return _decoded[hexs]
+    tool = exp(cfg.get("dec406_hex", "~/dec406/build/dec406_hex"))
+    try:
+        out = subprocess.run([tool, hexs], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    lines = []
+    for l in out.splitlines():
+        l = l.strip()
+        if l.startswith(KEEP) and l not in lines:
+            lines.append(l)
+    _decoded[hexs] = lines[:12]
+    return _decoded[hexs]
 
 
 def exp(p: str) -> str:
@@ -273,15 +298,19 @@ def build_state(cfg):
     for b in all_beacons.values():
         if b["class"] == "operational":
             hidden["fgb"] += 1
-        else:
+        if b["class"] != "operational" or FULL:
+            if FULL:
+                b["fields"] = decode_fields(b["hex"], cfg)
             public.append(b)
     public.sort(key=lambda b: -b["bursts"])
     sgb_public, sgb_hidden = [], 0
     for s in sorted(sgb_all, key=lambda s: s["utc"] or ""):
-        if s["test"]:
-            sgb_public.append(s)
-        else:
+        if not s["test"]:
             sgb_hidden += 1
+        if s["test"] or FULL:
+            if FULL:
+                s["fields"] = decode_fields(s["hex"], cfg)
+            sgb_public.append(s)
     try:
         progress = json.load(open(HERE / "progress.json"))
     except (OSError, ValueError):
@@ -303,6 +332,7 @@ def build_state(cfg):
         "satellites": satellites(cfg),
         "scoreboards": scoreboard(cfg),
         "progress": progress,
+        "full": FULL,
     }
 
 
@@ -318,8 +348,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(HERE / "dash.json"))
     ap.add_argument("--port", type=int, default=8896)
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--full", action="store_true",
+                    help="every beacon with its decoded fields; refuses any host but loopback")
     a = ap.parse_args()
+    global FULL
+    FULL = a.full
+    if a.host is None:
+        a.host = "127.0.0.1" if FULL else "0.0.0.0"
+    if FULL and a.host not in LOOPBACK:
+        raise SystemExit("--full shows operational beacons and positions: it only listens on 127.0.0.1 or ::1")
     load_mids()
     page = (HERE / "page.html").read_bytes()
 
