@@ -1,0 +1,10 @@
+meosar-rx
+Copyright (c) 2026 Mike Brown. GNU General Public License v3.0 or later (see LICENSE).
+
+src/input*.c, src/input.h, src/out.c, src/out.h come from inmarsat-rx (same author, GPL-3.0-or-later).
+
+Independent implementation from the Cospas-Sarsat specifications C/S T.001 (first-generation
+beacons) and C/S T.018 (second-generation beacons). dec406 (https://github.com/moricef/dec406,
+MIT) was used as a reference: for constants (BCH generators, frame sync words, PRN seeds and
+LFSR), test vectors, and as the baseline in comparisons. No dec406 code is compiled into this
+program. src/mids.c lists ITU Maritime Identification Digits, cross-checked with dec406's table.
