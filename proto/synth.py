@@ -46,8 +46,8 @@ def main():
     dur = a.n * a.spacing + 1.5
     # N0 from the quiet band on the first 2 s of the noise
     x2 = dsp.read_ci16(a.src, a.src_start, 2.0, fs)
-    xb = dsp.channelise(x2, (QUIET[0] + QUIET[1]) / 2 - fc, fs, 20, 260e3)
-    n0 = dsp.noise_psd(xb, fs / 20, -100e3, 100e3)   # unit-DC-gain FIR keeps the PSD per Hz
+    xb = dsp.channelise(x2, (QUIET[0] + QUIET[1]) / 2 - fc, fs, 20, 110e3)   # 110 kHz at 125 kS/s: no aliasing
+    n0 = dsp.noise_psd(xb, fs / 20, -40e3, 40e3)   # unit-DC-gain FIR keeps the PSD per Hz
     del x2, xb
     amp = np.sqrt(10 ** (a.cn0 / 10) * n0)
     truth, waves = [], []

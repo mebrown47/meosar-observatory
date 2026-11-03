@@ -161,7 +161,7 @@ def accept(res) -> str:
     return ""
 
 
-QUIET = (1543.62e6, 1543.88e6)   # no signals seen here: noise-only calibration band
+QUIET = (1543.69e6, 1543.81e6)   # no signals seen here: noise-only calibration band
 PRE, POST = 0.3, 0.9
 
 

@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
 		memset(b, 0, sizeof *b);
 		if (!strcmp(tok, "galileo")) { b->name = "galileo"; b->lo = 1544.04e6; b->hi = 1544.16e6; }
 		else if (!strcmp(tok, "glonass")) { b->name = "glonass"; b->lo = 1544.84e6; b->hi = 1544.96e6; }
-		else if (!strcmp(tok, "quiet")) { b->name = "quiet"; b->lo = 1543.62e6; b->hi = 1543.88e6; }
+		else if (!strcmp(tok, "quiet")) { b->name = "quiet"; b->lo = 1543.69e6; b->hi = 1543.81e6; }
 		else { fprintf(stderr, "unknown band %s\n", tok); return 1; }
 		if (b->lo < fc - fs / 2 || b->hi > fc + fs / 2) { fprintf(stderr, "band %s outside the input\n", tok); continue; }
 		b->mid = (b->lo + b->hi) / 2;

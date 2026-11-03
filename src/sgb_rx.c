@@ -12,19 +12,23 @@
 #define TC (1.0 / SGB_CHIP_RATE)
 #define NSEG SGB_PRE_BITS
 #define MDFT 32
-#define KLAGS 32
 #define ACQ_DEC 2
-#define ACQ_NFFT (1 << 17)
+#define TN 4096          // tile FFT length
+#define KTILE 2          // lags kept per tile and bin for the coherent stage
+#define BIN_STEP 10      // coarse frequency bin = 10 tile-FFT bins (152.6 Hz at 62.5 kS/s)
 
 struct sgb_acq {
-	double fs_in, fs, span, seg_T;
-	int nfft, npre, nbins, threads;
-	float *h;                 // decimation filter
-	int ntaps;
-	fftwf_complex *G;         // NSEG x nfft conj replica spectra
+	double fs_in, fs, seg_T, span;
+	int ntaps, Ls, T, threads, nbins, npre;
+	float *h;
+	int o[NSEG];             // segment start, samples from the preamble start
+	fftwf_complex *S;        // NSEG x TN conjugate spectra of the short segment replicas
 	fftwf_plan fwd, inv;
-	fftwf_complex *X;
-	double *bins;
+	int *sh;                 // bin shift in tile-FFT bins
+	double *fb;              // bin frequency, Hz
+	double complex *corr;    // nbins x NSEG: exp(-j 2pi fb o_j / fs), absolute phase reference
+	float *xd;               // decimated block
+	size_t nd, xcap;
 };
 
 sgb_acq_t *sgb_acq_new(double fs_in, double span_hz, int threads) {
@@ -32,142 +36,159 @@ sgb_acq_t *sgb_acq_new(double fs_in, double span_hz, int threads) {
 	sgb_acq_t *a = calloc(1, sizeof *a);
 	a->fs_in = fs_in;
 	a->fs = fs_in / ACQ_DEC;
-	a->nfft = ACQ_NFFT;
 	a->threads = threads < 1 ? 1 : threads;
 	a->seg_T = SGB_CHIPS_PER_BIT * TC;
 	a->ntaps = 63;
 	a->h = fir_lowpass(a->ntaps, 0.45 * a->fs, fs_in, 8.0);
-	a->npre = (int)ceil(NSEG * a->seg_T * a->fs) + 2;
+	double S = a->seg_T * a->fs;                       // samples per segment (fractional)
+	a->Ls = (int)ceil(S) + 2;
+	a->T = TN - a->Ls + 1;
+	a->npre = (int)ceil(NSEG * S) + 2;
 	const float *ci = sgb_chips_i(SGB_NORMAL), *cq = sgb_chips_q(SGB_NORMAL);
-	a->G = fftwf_malloc(sizeof(fftwf_complex) * (size_t)NSEG * a->nfft);
-	a->X = fftwf_malloc(sizeof(fftwf_complex) * a->nfft);
-	fftwf_complex *tmp = fftwf_malloc(sizeof(fftwf_complex) * a->nfft);
-	a->fwd = fftwf_plan_dft_1d(a->nfft, tmp, a->X, FFTW_FORWARD, FFTW_MEASURE);
-	a->inv = fftwf_plan_dft_1d(a->nfft, a->X, tmp, FFTW_BACKWARD, FFTW_MEASURE);
-	float *g = (float *)tmp;
+	a->S = fftwf_malloc(sizeof(fftwf_complex) * (size_t)NSEG * TN);
+	fftwf_complex *tmp = fftwf_malloc(sizeof(fftwf_complex) * TN), *tmp2 = fftwf_malloc(sizeof(fftwf_complex) * TN);
+	a->fwd = fftwf_plan_dft_1d(TN, tmp, tmp2, FFTW_FORWARD, FFTW_MEASURE);
+	a->inv = fftwf_plan_dft_1d(TN, tmp, tmp2, FFTW_BACKWARD, FFTW_MEASURE);
 	for (int j = 0; j < NSEG; j++) {
-		memset(tmp, 0, sizeof(fftwf_complex) * a->nfft);
-		for (int i = 0; i < a->npre; i++) {
-			double t = i / a->fs;
+		a->o[j] = (int)floor(j * S);
+		float *g = (float *)tmp;
+		memset(tmp, 0, sizeof(fftwf_complex) * TN);
+		int lo = j * SGB_CHIPS_PER_BIT, hi = lo + SGB_CHIPS_PER_BIT;
+		for (int m = 0; m < a->Ls; m++) {
+			double t = (a->o[j] + m) / a->fs;
 			int ki = (int)(t / TC), kq = (int)floor(t / TC - 0.5);
-			int lo = j * SGB_CHIPS_PER_BIT, hi = lo + SGB_CHIPS_PER_BIT;
-			if (ki >= lo && ki < hi) g[2 * i] += ci[ki];
-			if (kq >= lo && kq < hi) g[2 * i + 1] += cq[kq];
+			if (ki >= lo && ki < hi) g[2 * m] += ci[ki];
+			if (kq >= lo && kq < hi) g[2 * m + 1] += cq[kq];
 		}
-		fftwf_complex *Gj = a->G + (size_t)j * a->nfft;
-		fftwf_execute_dft(a->fwd, tmp, Gj);
-		float *p = (float *)Gj;
-		for (int k = 0; k < a->nfft; k++) p[2 * k + 1] = -p[2 * k + 1];   // conjugate
+		fftwf_complex *Sj = a->S + (size_t)j * TN;
+		fftwf_execute_dft(a->fwd, tmp, Sj);
+		float *p = (float *)Sj;
+		for (int k = 0; k < TN; k++) p[2 * k + 1] = -p[2 * k + 1];
 	}
-	fftwf_free(tmp);
-	double df = 1.0 / a->seg_T;
-	a->nbins = 2 * (int)floor(span_hz / df) + 1;
-	a->bins = malloc(sizeof(double) * a->nbins);
-	for (int b = 0; b < a->nbins; b++) a->bins[b] = (b - a->nbins / 2) * df;
+	fftwf_free(tmp); fftwf_free(tmp2);
+	double fres = a->fs / TN;
+	int B = (int)floor(span_hz / (BIN_STEP * fres));
+	a->nbins = 2 * B + 1;
+	a->sh = malloc(sizeof(int) * a->nbins);
+	a->fb = malloc(sizeof(double) * a->nbins);
+	a->corr = malloc(sizeof(double complex) * a->nbins * NSEG);
+	for (int b = 0; b < a->nbins; b++) {
+		a->sh[b] = (b - B) * BIN_STEP;
+		a->fb[b] = a->sh[b] * fres;
+		for (int j = 0; j < NSEG; j++) a->corr[b * NSEG + j] = cexp(-I * 2 * M_PI * a->fb[b] * a->o[j] / a->fs);
+	}
 	a->span = span_hz;
 	return a;
 }
 
-double sgb_acq_span(const sgb_acq_t *a) { return (a->nfft - a->npre) / a->fs; }
+double sgb_acq_span(const sgb_acq_t *a) { return 1.9; }
 
 void sgb_acq_free(sgb_acq_t *a) {
 	if (!a) return;
-	fftwf_free(a->G); fftwf_free(a->X);
+	fftwf_free(a->S);
 	fftwf_destroy_plan(a->fwd); fftwf_destroy_plan(a->inv);
-	free(a->h); free(a->bins); free(a);
+	free(a->h); free(a->sh); free(a->fb); free(a->corr); free(a->xd); free(a);
 }
+
+typedef struct { double p, sum; long cnt; int lag; double f; } binbest_t;
 
 typedef struct {
 	sgb_acq_t *a;
-	int nlag;
-	int next;                    // shared bin counter
+	int nlag, ntiles, next;
 	pthread_mutex_t mu;
-	sgb_peak_t *best;            // one per bin
+	binbest_t *res;          // merged per bin
 } job_t;
-
-static int cmp_desc(const void *x, const void *y) {
-	float a = *(const float *)x, b = *(const float *)y;
-	return (a < b) - (a > b);
-}
 
 static void *worker(void *arg) {
 	job_t *J = arg;
 	sgb_acq_t *a = J->a;
-	int N = a->nfft, nlag = J->nlag;
-	fftwf_complex *prod = fftwf_malloc(sizeof(fftwf_complex) * N);
-	fftwf_complex *zt = fftwf_malloc(sizeof(fftwf_complex) * N);
-	float *Z = malloc(sizeof(float) * 2 * (size_t)NSEG * nlag);
-	float *Nc = malloc(sizeof(float) * nlag), *srt = malloc(sizeof(float) * nlag);
-	double fres = a->fs / N;
+	int T = a->T, nb = a->nbins;
+	fftwf_complex *X = fftwf_malloc(sizeof(fftwf_complex) * (size_t)NSEG * TN);
+	fftwf_complex *in = fftwf_malloc(sizeof(fftwf_complex) * TN), *z = fftwf_malloc(sizeof(fftwf_complex) * TN);
+	float *Zt = malloc(sizeof(float) * 2 * (size_t)NSEG * T), *Nc = malloc(sizeof(float) * T);
+	binbest_t *loc = calloc((size_t)nb, sizeof(binbest_t));
+	double complex tw[MDFT][NSEG];
+	for (int m = 0; m < MDFT; m++)
+		for (int j = 0; j < NSEG; j++) tw[m][j] = cexp(-I * 2 * M_PI * m * j / MDFT);
 	for (;;) {
 		pthread_mutex_lock(&J->mu);
-		int b = J->next++;
+		int ti = J->next++;
 		pthread_mutex_unlock(&J->mu);
-		if (b >= a->nbins) break;
-		int sh = (int)lround(a->bins[b] / fres);
-		memset(Nc, 0, sizeof(float) * nlag);
-		const float *X = (const float *)a->X;
+		if (ti >= J->ntiles) break;
+		int L0 = ti * T, nt = J->nlag - L0 < T ? J->nlag - L0 : T;
 		for (int j = 0; j < NSEG; j++) {
-			const float *G = (const float *)(a->G + (size_t)j * N);
-			float *P = (float *)prod;
-			for (int k = 0; k < N; k++) {
-				int ks = (k + sh) & (N - 1);           // roll(X, -sh)
-				float xr = X[2 * ks], xi = X[2 * ks + 1], gr = G[2 * k], gi = G[2 * k + 1];
-				P[2 * k] = xr * gr - xi * gi;
-				P[2 * k + 1] = xr * gi + xi * gr;
+			float *ip = (float *)in;
+			long s0 = (long)L0 + a->o[j];
+			for (int k = 0; k < TN; k++) {
+				long idx = s0 + k;
+				if (idx < (long)a->nd) { ip[2 * k] = a->xd[2 * idx]; ip[2 * k + 1] = a->xd[2 * idx + 1]; }
+				else ip[2 * k] = ip[2 * k + 1] = 0;
 			}
-			fftwf_execute_dft(a->inv, prod, zt);
-			const float *zz = (const float *)zt;
-			float *Zj = Z + 2 * (size_t)j * nlag;
-			for (int l = 0; l < nlag; l++) {
-				Zj[2 * l] = zz[2 * l]; Zj[2 * l + 1] = zz[2 * l + 1];
-				Nc[l] += zz[2 * l] * zz[2 * l] + zz[2 * l + 1] * zz[2 * l + 1];
-			}
+			fftwf_execute_dft(a->fwd, in, X + (size_t)j * TN);
 		}
-		double mean = 0;
-		for (int l = 0; l < nlag; l++) mean += Nc[l];
-		mean /= nlag;
-		// K-th largest non-coherent value as the screen
-		memcpy(srt, Nc, sizeof(float) * nlag);
-		int K = KLAGS < nlag ? KLAGS : nlag;
-		// partial selection: nth element via qsort of a sample is simpler but slow; use a heap-free pass
-		float thr;
-		{
-			// quickselect for the K-th largest
-			int lo = 0, hi = nlag - 1, k = K - 1;
-			while (lo < hi) {
-				float p = srt[(lo + hi) / 2];
-				int i = lo, jx = hi;
-				while (i <= jx) {
-					while (srt[i] > p) i++;
-					while (srt[jx] < p) jx--;
-					if (i <= jx) { float t = srt[i]; srt[i] = srt[jx]; srt[jx] = t; i++; jx--; }
+		for (int b = 0; b < nb; b++) {
+			int sh = a->sh[b];
+			memset(Nc, 0, sizeof(float) * nt);
+			for (int j = 0; j < NSEG; j++) {
+				const float *Xj = (const float *)(X + (size_t)j * TN), *Sj = (const float *)(a->S + (size_t)j * TN);
+				float *P = (float *)in;
+				for (int k = 0; k < TN; k++) {
+					int ks = (k + sh) & (TN - 1);
+					float xr = Xj[2 * ks], xi = Xj[2 * ks + 1], gr = Sj[2 * k], gi = Sj[2 * k + 1];
+					P[2 * k] = xr * gr - xi * gi;
+					P[2 * k + 1] = xr * gi + xi * gr;
 				}
-				if (k <= jx) hi = jx; else if (k >= i) lo = i; else break;
-			}
-			thr = srt[k];
-		}
-		sgb_peak_t pk = {0, 0, 0};
-		for (int l = 0; l < nlag; l++) {
-			if (Nc[l] < thr) continue;
-			for (int m = 0; m < MDFT; m++) {
-				double re = 0, im = 0;
-				for (int j = 0; j < NSEG; j++) {
-					double ph = -2 * M_PI * m * j / MDFT, c = cos(ph), s = sin(ph);
-					const float *Zj = Z + 2 * (size_t)j * nlag;
-					re += Zj[2 * l] * c - Zj[2 * l + 1] * s;
-					im += Zj[2 * l] * s + Zj[2 * l + 1] * c;
-				}
-				double p = (re * re + im * im) / mean;
-				if (p > pk.z) {
-					int mf = m < MDFT / 2 ? m : m - MDFT;
-					pk.z = p; pk.t = l / a->fs; pk.f = a->bins[b] + mf / (MDFT * a->seg_T);
+				fftwf_execute_dft(a->inv, in, z);
+				const float *zz = (const float *)z;
+				float cr = (float)creal(a->corr[b * NSEG + j]), cim = (float)cimag(a->corr[b * NSEG + j]);
+				float *Zj = Zt + 2 * (size_t)j * T;
+				for (int l = 0; l < nt; l++) {
+					float r = zz[2 * l], i = zz[2 * l + 1];
+					Zj[2 * l] = r * cr - i * cim;
+					Zj[2 * l + 1] = r * cim + i * cr;
+					Nc[l] += r * r + i * i;
 				}
 			}
+			// best KTILE lags of the non-coherent sum, at least 3 lags apart
+			int pick[KTILE], np = 0;
+			for (int q = 0; q < KTILE; q++) {
+				int bi = -1;
+				for (int l = 0; l < nt; l++) {
+					int near = 0;
+					for (int r = 0; r < np; r++) if (abs(l - pick[r]) < 3) near = 1;
+					if (!near && (bi < 0 || Nc[l] > Nc[bi])) bi = l;
+				}
+				if (bi >= 0) pick[np++] = bi;
+			}
+			double sum = 0;
+			for (int l = 0; l < nt; l++) sum += Nc[l];
+			loc[b].sum += sum;
+			loc[b].cnt += nt;
+			for (int q = 0; q < np; q++) {
+				int l = pick[q];
+				for (int m = 0; m < MDFT; m++) {
+					double complex y = 0;
+					for (int j = 0; j < NSEG; j++) {
+						const float *Zj = Zt + 2 * (size_t)j * T;
+						y += (Zj[2 * l] + I * Zj[2 * l + 1]) * tw[m][j];
+					}
+					double p = creal(y) * creal(y) + cimag(y) * cimag(y);
+					if (p > loc[b].p) {
+						int mf = m < MDFT / 2 ? m : m - MDFT;
+						loc[b].p = p; loc[b].lag = L0 + l; loc[b].f = a->fb[b] + mf / (MDFT * a->seg_T);
+					}
+				}
+			}
 		}
-		J->best[b] = pk;
 	}
-	fftwf_free(prod); fftwf_free(zt); free(Z); free(Nc); free(srt);
+	pthread_mutex_lock(&J->mu);
+	for (int b = 0; b < nb; b++) {
+		J->res[b].sum += loc[b].sum;
+		J->res[b].cnt += loc[b].cnt;
+		if (loc[b].p > J->res[b].p) { J->res[b].p = loc[b].p; J->res[b].lag = loc[b].lag; J->res[b].f = loc[b].f; }
+	}
+	pthread_mutex_unlock(&J->mu);
+	fftwf_free(X); fftwf_free(in); fftwf_free(z); free(Zt); free(Nc); free(loc);
 	return NULL;
 }
 
@@ -177,14 +198,9 @@ static int by_z(const void *x, const void *y) {
 }
 
 int sgb_acq_search(sgb_acq_t *a, const cf_t *x, size_t n, double t_max, sgb_peak_t *out, int max) {
-	(void)cmp_desc;
-	// decimate by 2 with the acquisition filter (output k <-> input 2k)
 	size_t nd = n / ACQ_DEC;
-	if (nd > (size_t)a->nfft) nd = (size_t)a->nfft;
-	float *X = (float *)a->X;
-	fftwf_complex *tmp = fftwf_malloc(sizeof(fftwf_complex) * a->nfft);
-	float *t = (float *)tmp;
-	memset(tmp, 0, sizeof(fftwf_complex) * a->nfft);
+	if (nd > a->xcap) { a->xcap = nd; a->xd = realloc(a->xd, sizeof(float) * 2 * nd); }
+	a->nd = nd;
 	int c = (a->ntaps - 1) / 2;
 	for (size_t k = 0; k < nd; k++) {
 		float re = 0, im = 0;
@@ -194,24 +210,28 @@ int sgb_acq_search(sgb_acq_t *a, const cf_t *x, size_t n, double t_max, sgb_peak
 			re += a->h[j] * crealf(x[idx]);
 			im += a->h[j] * cimagf(x[idx]);
 		}
-		t[2 * k] = re; t[2 * k + 1] = im;
+		a->xd[2 * k] = re; a->xd[2 * k + 1] = im;
 	}
-	fftwf_execute_dft(a->fwd, tmp, a->X);
-	fftwf_free(tmp);
-	(void)X;
 	int nlag = (int)fmin(t_max * a->fs, (double)(nd > (size_t)a->npre ? nd - a->npre : 0));
 	if (nlag <= 0) return 0;
-	job_t J = {.a = a, .nlag = nlag, .next = 0};
+	job_t J = {.a = a, .nlag = nlag, .ntiles = (nlag + a->T - 1) / a->T, .next = 0};
 	pthread_mutex_init(&J.mu, NULL);
-	J.best = calloc((size_t)a->nbins, sizeof(sgb_peak_t));
+	J.res = calloc((size_t)a->nbins, sizeof(binbest_t));
 	pthread_t th[32];
 	int nt = a->threads > 32 ? 32 : a->threads;
 	for (int i = 0; i < nt; i++) pthread_create(&th[i], NULL, worker, &J);
 	for (int i = 0; i < nt; i++) pthread_join(th[i], NULL);
-	qsort(J.best, (size_t)a->nbins, sizeof(sgb_peak_t), by_z);
+	sgb_peak_t *pk = malloc(sizeof(sgb_peak_t) * a->nbins);
+	for (int b = 0; b < a->nbins; b++) {
+		double mean = J.res[b].cnt ? J.res[b].sum / J.res[b].cnt : 1;
+		pk[b].z = J.res[b].p / mean;
+		pk[b].t = J.res[b].lag / a->fs;
+		pk[b].f = J.res[b].f;
+	}
+	qsort(pk, (size_t)a->nbins, sizeof(sgb_peak_t), by_z);
 	int k = 0;
-	for (int i = 0; i < a->nbins && k < max; i++) out[k++] = J.best[i];
-	free(J.best);
+	for (int i = 0; i < a->nbins && k < max; i++) out[k++] = pk[i];
+	free(pk); free(J.res);
 	pthread_mutex_destroy(&J.mu);
 	return k;
 }
