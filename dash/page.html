@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEOSAR L-band · ESG-KATL</title>
+<style>
+  /* Same dark station style as the iridium, vdl2, inmarsat and station pages */
+  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c232c;--line:#2b333d;--fg:#e6edf3;--dim:#8b98a5;
+    --accent:#4aa8ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--sgb:#c297ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650}
+  header .sub{color:var(--dim);font-size:12.5px}
+  header .status{margin-left:auto;color:var(--dim);font-size:12px}
+  main{padding:16px 22px;max-width:1400px;margin:0 auto}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 14px;min-width:0}
+  .card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  .card .v{font-size:21px;font-weight:600;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+  .card .v small{font-size:12px;color:var(--dim);font-weight:400}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px;min-width:0;overflow-x:auto}
+  .panel h2{font-size:13px;margin:0 0 8px;font-weight:600;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+  .panel h2 .hint{color:var(--dim);font-weight:400;font-size:11.5px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #1b2129;vertical-align:top}
+  th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .dim{color:var(--dim)}
+  .pill{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid;text-transform:uppercase;letter-spacing:.5px;font-weight:600;white-space:nowrap}
+  .pill.ok{color:var(--ok);border-color:#1f4f2b}.pill.warn{color:var(--warn);border-color:#5c4513}
+  .pill.bad{color:var(--bad);border-color:#6b2226}.pill.dim{color:var(--dim);border-color:var(--line)}
+  .pill.acc{color:var(--accent);border-color:#1d4a73}.pill.sgb{color:var(--sgb);border-color:#4b3473}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle;background:var(--dim)}
+  .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+  .bar{height:7px;border-radius:4px;background:var(--accent);display:inline-block;vertical-align:middle}
+  .bar.d{background:#6e7681}
+  ul.prog{list-style:none;margin:0;padding:0}
+  ul.prog li{padding:5px 0;border-bottom:1px solid #1b2129;display:flex;gap:10px;align-items:baseline}
+  ul.prog li .pill{min-width:76px;text-align:center}
+  .note{color:var(--dim);font-size:12px;margin-top:6px}
+  footer{color:var(--dim);font-size:12px;padding:6px 22px 22px;max-width:1400px;margin:0 auto}
+  svg text{fill:var(--dim);font-size:10px}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <h1>MEOSAR L-band · <span id="station">ESG-KATL</span></h1>
+  <span class="sub">Cospas-Sarsat 406 MHz beacon bursts relayed by Galileo (1544.1 MHz) and GLONASS-K (1544.9 MHz) SAR transponders · meosar-rx in development</span>
+  <span class="status" id="status">loading…</span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <div class="grid">
+    <div>
+      <div class="panel"><h2>Recording and processing <span class="hint" id="rechint"></span></h2><div id="rec"></div><div id="jobs"></div></div>
+      <div class="panel"><h2>Results by recording <span class="hint">confirmed beacons and decoded bursts</span></h2><div id="datasets"></div></div>
+      <div class="panel"><h2>Decoded bursts per 5 minutes <span class="hint">UTC</span></h2><div id="timeline"></div></div>
+    </div>
+    <div>
+      <div class="panel"><h2>SAR satellites in view <span class="hint" id="sathint"></span></h2><div id="sats"></div></div>
+      <div class="panel"><h2>Build progress</h2><ul class="prog" id="prog"></ul></div>
+    </div>
+  </div>
+  <div class="panel"><h2>Orbitography and test beacons <span class="hint" id="bhint"></span></h2><div id="beacons"></div></div>
+  <div class="panel"><h2>Second-generation (SGB) bursts <span class="hint" id="shint"></span></h2><div id="sgb"></div></div>
+  <div class="panel"><h2>Scoreboard: synthetic bursts in real feeder noise <span class="hint">share of 40 bursts decoded, by C/N0</span></h2><div id="score"></div></div>
+</main>
+<footer>
+  Only beacons that are not operational are identified here: orbitography (calibration), test-protocol and self-test transmissions.
+  Other beacons may be real distress alerts; they are counted, and their IDs and positions stay on the station.
+  This station is not part of Cospas-Sarsat; alerts reach rescue services through the system's own ground stations.
+</footer>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const t = s => s ? esc(s.replace("T", " ").replace(/\.\d+\+00:00$/, "").replace("+00:00", "")) + " UTC" : "—";
+const ago = secs => secs < 90 ? `${secs} s` : secs < 5400 ? `${Math.round(secs / 60)} min` : `${(secs / 3600).toFixed(1)} h`;
+const CLASS = {orbitography: ["acc", "orbitography"], test: ["warn", "test"]};
+
+function tiles(s) {
+  const T = s.totals;
+  const items = [
+    ["Beacons", `${T.beacons}`, `${T.public} shown · ${T.operational} counted`],
+    ["Decoded FGB bursts", `${T.bursts}`, `${T.only_combined} only via relay combining`],
+    ["SGB bursts", `${T.sgb}`, "second generation"],
+    ["Countries", `${T.countries}`, "of registration"],
+  ];
+  $("tiles").innerHTML = items.map(([k, v, sm]) => `<div class="card"><div class="k">${k}</div><div class="v">${v} <small>${sm}</small></div></div>`).join("");
+}
+
+function rec(s) {
+  const R = s.recording;
+  let h = "";
+  if (R.active) h += `<p><span class="dot ok"></span>Recording <span class="mono">${esc(R.active)}</span></p>`;
+  else if (R.waiting_until && new Date(R.waiting_until) > new Date()) h += `<p><span class="dot warn"></span>Next recording starts ${t(R.waiting_until)}</p>`;
+  else h += `<p><span class="dot"></span>Not recording</p>`;
+  if (R.chunks.length) {
+    h += `<table><tr><th>Chunk</th><th class="r">Minutes</th><th class="r">GB</th></tr>` +
+      R.chunks.map(c => `<tr><td class="mono">${esc(c.name)}</td><td class="r">${c.minutes}</td><td class="r">${c.gb}</td></tr>`).join("") + `</table>`;
+  }
+  $("rec").innerHTML = h;
+  $("rechint").textContent = `${R.chunks.length} chunks · 1544.5 MHz, 2.5 MS/s`;
+  const J = s.jobs;
+  $("jobs").innerHTML = J.length ? `<table style="margin-top:8px"><tr><th>Running</th><th class="r">For</th><th class="r">CPU</th></tr>` +
+    J.map(j => `<tr><td>${esc(j.what)} <span class="dim">${esc(j.detail)}</span></td><td class="r">${ago(j.secs)}</td><td class="r">${j.cpu.toFixed(0)}%</td></tr>`).join("") + `</table>`
+    : `<p class="dim">No processing running.</p>`;
+}
+
+function datasets(s) {
+  $("datasets").innerHTML = `<table><tr><th>Recording</th><th class="r">Beacons</th><th class="r">Bursts</th><th class="r">Via relays only</th><th>Relays per burst</th><th class="r">SGB</th></tr>` +
+    s.datasets.map(d => {
+      if (!d.processed) return `<tr><td>${esc(d.name)}<div class="dim">${esc(d.note)}</div></td><td colspan="5" class="dim">not processed yet</td></tr>`;
+      const rel = Object.entries(d.relays).map(([k, v]) => `${k}: ${v}`).join(" · ");
+      return `<tr><td>${esc(d.name)}<div class="dim">${esc(d.note)}</div></td><td class="r">${d.beacons}</td><td class="r">${d.bursts}</td><td class="r">${d.only_combined}</td><td class="mono">${rel}</td><td class="r">${d.sgb}</td></tr>`;
+    }).join("") + `</table>`;
+}
+
+function timeline(s) {
+  const tl = s.timeline;
+  if (!tl.length) { $("timeline").innerHTML = `<p class="dim">No decoded bursts yet.</p>`; return; }
+  const max = Math.max(...tl.map(x => x[1])), W = 760, H = 120, bw = Math.max(4, Math.min(24, (W - 40) / tl.length - 2));
+  let g = `<svg viewBox="0 0 ${W} ${H + 24}" width="100%" role="img" aria-label="Decoded bursts per 5 minutes">`;
+  for (const f of [0.5, 1]) g += `<line x1="30" x2="${W}" y1="${H - f * H + 4}" y2="${H - f * H + 4}" stroke="#2b333d"/><text x="0" y="${H - f * H + 8}">${Math.round(f * max)}</text>`;
+  tl.forEach(([k, v], i) => {
+    const x = 34 + i * (bw + 2), h = v / max * (H - 8);
+    g += `<rect x="${x}" y="${H + 4 - h}" width="${bw}" height="${h}" rx="2" fill="#4aa8ff"><title>${esc(k.slice(11))} UTC: ${v} bursts</title></rect>`;
+    if (i % Math.ceil(tl.length / 8) === 0) g += `<text x="${x}" y="${H + 20}">${esc(k.slice(11, 16))}</text>`;
+  });
+  $("timeline").innerHTML = g + `</svg>`;
+}
+
+function sats(s) {
+  const S = s.satellites;
+  if (!S || S.stale) { $("sats").innerHTML = `<p class="dim">No pass prediction for now.</p>`; return; }
+  $("sathint").textContent = `predicted for ${S.slot_utc.slice(11)} UTC · above 10°`;
+  $("sats").innerHTML = `<table><tr><th>Satellite</th><th class="r">Elevation</th><th class="r">Azimuth</th><th class="r">Downlink Doppler</th></tr>` +
+    S.sats.map(x => `<tr><td>${esc(x.con)} <span class="mono">${esc(x.name)}</span> <span class="dim">C/S ${x.id}</span></td><td class="r">${x.el}°</td><td class="r">${x.az}°</td><td class="r">${x.dop_hz > 0 ? "+" : ""}${(x.dop_hz / 1000).toFixed(2)} kHz</td></tr>`).join("") + `</table>`;
+}
+
+function prog(s) {
+  const P = {done: "ok", running: "acc", scheduled: "warn", next: "dim", later: "dim"};
+  $("prog").innerHTML = s.progress.map(p => `<li><span class="pill ${P[p.state] || "dim"}">${esc(p.state)}</span><span>${esc(p.item)}${p.note ? ` <span class="dim">· ${esc(p.note)}</span>` : ""}</span></li>`).join("");
+}
+
+function beacons(s) {
+  const B = s.beacons;
+  $("bhint").textContent = `${B.length} shown · ${s.totals.operational} operational-type beacons counted only`;
+  if (!B.length) { $("beacons").innerHTML = `<p class="dim">None yet.</p>`; return; }
+  const maxb = Math.max(...B.map(b => b.bursts));
+  $("beacons").innerHTML = `<table><tr><th>Beacon ID</th><th>Type</th><th class="r">Country</th><th>Bursts</th><th class="r">Best Eb/N0</th><th class="r">Relays</th><th>First heard</th><th>Last heard</th></tr>` +
+    B.map(b => {
+      const [c, l] = CLASS[b.class] || ["dim", b.class];
+      return `<tr><td class="mono">${esc(b.id)}</td><td><span class="pill ${c}">${l}</span>${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td><td class="r">${b.country}</td>` +
+        `<td><span class="bar" style="width:${Math.max(3, b.bursts / maxb * 120)}px"></span> <span class="dim">${b.bursts}</span></td>` +
+        `<td class="r">${b.ebn0_max.toFixed(1)} dB</td><td class="r">${b.relays_max}</td><td class="dim">${t(b.first)}</td><td class="dim">${t(b.last)}</td></tr>`;
+    }).join("") + `</table>`;
+}
+
+function sgb(s) {
+  const S = s.sgb;
+  $("shint").textContent = `${S.length} test-protocol bursts shown · ${s.sgb_operational} others counted only`;
+  if (!S.length) { $("sgb").innerHTML = `<p class="dim">None decoded yet.</p>`; return; }
+  $("sgb").innerHTML = `<table><tr><th>Time</th><th class="r">TAC</th><th class="r">Serial</th><th class="r">Country</th><th class="r">Relays</th><th>Relay Eb/N0</th><th>Decode</th></tr>` +
+    S.map(x => `<tr><td class="dim">${t(x.utc)}</td><td class="r">${x.tac}</td><td class="r">${x.serial}</td><td class="r">${x.country}</td><td class="r">${x.relays}</td>` +
+      `<td class="mono">${x.ebn0.map(e => (e ?? 0).toFixed(1)).join(" · ")} dB</td><td><span class="pill sgb">${esc(x.how)}</span>${x.alone ? "" : ' <span class="dim">combined only</span>'}</td></tr>`).join("") + `</table>`;
+}
+
+function score(s) {
+  const SB = s.scoreboards;
+  if (!SB.length) { $("score").innerHTML = `<p class="dim">Running…</p>`; return; }
+  $("score").innerHTML = SB.map(sb => `<p class="dim">${esc(sb.name)}</p><table><tr><th class="r">C/N0</th><th>meosar-rx</th><th>dec406 decoder</th><th>dec406 demodulator, true start given</th></tr>` +
+    sb.rows.map(r => {
+      const cell = (v, d) => v == null ? `<td class="dim">—</td>` : `<td><span class="bar${d ? " d" : ""}" style="width:${Math.max(2, v / r.n * 160)}px"></span> <span class="dim">${v}/${r.n}</span></td>`;
+      return `<tr><td class="r">${r.cn0.toFixed(0)} dB-Hz</td>${cell(r.ours, 0)}${cell(r.dec406, 1)}${cell(r.dec406_demod, 1)}</tr>`;
+    }).join("") + `</table>`).join("");
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("api/state", {cache: "no-store"});
+    const s = await r.json();
+    $("station").textContent = s.station;
+    tiles(s); rec(s); datasets(s); timeline(s); sats(s); prog(s); beacons(s); sgb(s); score(s);
+    $("status").textContent = `updated ${s.generated.slice(11, 19)} UTC`;
+  } catch (e) {
+    $("status").textContent = "cannot reach the station";
+  }
+}
+refresh();
+setInterval(refresh, 20000);
+</script>
+</body>
+</html>
