@@ -38,9 +38,6 @@
   .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
   .bar{height:7px;border-radius:4px;background:var(--accent);display:inline-block;vertical-align:middle}
   .bar.d{background:#6e7681}
-  ul.prog{list-style:none;margin:0;padding:0}
-  ul.prog li{padding:5px 0;border-bottom:1px solid #1b2129;display:flex;gap:10px;align-items:baseline}
-  ul.prog li .pill{min-width:76px;text-align:center}
   .note{color:var(--dim);font-size:12px;margin-top:6px}
   footer{color:var(--dim);font-size:12px;padding:6px 22px 22px;max-width:1400px;margin:0 auto}
   svg text{fill:var(--dim);font-size:10px}
@@ -68,7 +65,6 @@
     </div>
     <div>
       <div class="panel"><h2>SAR satellites in view <span class="hint" id="sathint"></span></h2><div id="sats"></div></div>
-      <div class="panel"><h2>Build progress</h2><ul class="prog" id="prog"></ul></div>
     </div>
   </div>
   <div class="panel"><h2><span id="btitle">Orbitography and test beacons</span> <span class="hint" id="bhint"></span></h2><div id="beacons"></div></div>
@@ -148,11 +144,6 @@ function sats(s) {
     S.sats.map(x => `<tr><td>${esc(x.con)} <span class="mono">${esc(x.name)}</span> <span class="dim">C/S ${x.id}</span></td><td class="r">${x.el}°</td><td class="r">${x.az}°</td><td class="r">${x.dop_hz > 0 ? "+" : ""}${(x.dop_hz / 1000).toFixed(2)} kHz</td></tr>`).join("") + `</table>`;
 }
 
-function prog(s) {
-  const P = {done: "ok", running: "acc", scheduled: "warn", next: "dim", later: "dim"};
-  $("prog").innerHTML = s.progress.map(p => `<li><span class="pill ${P[p.state] || "dim"}">${esc(p.state)}</span><span>${esc(p.item)}${p.note ? ` <span class="dim">· ${esc(p.note)}</span>` : ""}</span></li>`).join("");
-}
-
 function beacons(s) {
   const B = s.beacons;
   $("bhint").textContent = s.full ? `${B.length} beacons, all shown (local view)` : `${B.length} shown · ${s.totals.operational} operational-type beacons counted only`;
@@ -197,7 +188,7 @@ async function refresh() {
       document.title = "LOCAL · MEOSAR full detail";
       document.querySelector("footer").textContent = "Local full view on 127.0.0.1. Operational beacons are shown in full here and must not be published.";
     }
-    tiles(s); rec(s); datasets(s); timeline(s); sats(s); prog(s); beacons(s); sgb(s); score(s);
+    tiles(s); rec(s); datasets(s); timeline(s); sats(s); beacons(s); sgb(s); score(s);
     $("status").textContent = `updated ${s.generated.slice(11, 19)} UTC`;
   } catch (e) {
     $("status").textContent = "cannot reach the station";
