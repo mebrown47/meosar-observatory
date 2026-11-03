@@ -158,6 +158,9 @@ def fgb_summary(recs):
 def sgb_summary(recs):
     out = []
     for r in recs:
+        # SGB records only: the C receiver tags them; the Python scan's have relays and no t_cw
+        if not (r.get("kind") == "sgb" or ("relays" in r and "t_cw" not in r)):
+            continue
         if not r.get("ok") or not r.get("hex"):
             continue
         if r.get("kind") == "sgb" and not r.get("accept"):
