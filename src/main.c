@@ -7,6 +7,7 @@
 // coherent CW detector -> coherent demodulator -> Chase-II BCH -> relay combining. One JSON
 // record per candidate on stdout (and UDP), same fields as the Python prototype.
 #include <getopt.h>
+#include <pthread.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -104,6 +105,59 @@ static void emit(const fgb_rec_t *r, const fgb_rec_t *all, double t0_ms, int wit
 	jb_raw(&b, "}");
 	out_emit(b.s);
 	jb_free(&b);
+}
+
+#define AHEAD_S 60.0
+
+typedef struct {
+	input_t *in;
+	band_t *bands;
+	int nb;
+	double fs, f1;
+	long long skip, total;     // input samples to skip first; to read in all (-1: no limit)
+	long long processed_to;    // band index processing has finished with
+	int eof;
+	pthread_mutex_t mu;
+	pthread_cond_t cv;
+} reader_t;
+
+static void *reader_main(void *arg) {
+	reader_t *R = arg;
+	const int CH = 65536;
+	float *iq = malloc(sizeof(float) * 2 * CH);
+	cf_t *xin = malloc(sizeof(cf_t) * CH), *yout = malloc(sizeof(cf_t) * (CH / D1 + 16));
+	while (R->skip > 0 && !stop) {
+		int k = R->in->read(R->in, iq, R->skip > CH ? CH : (int)R->skip);
+		if (k <= 0) break;
+		R->skip -= k;
+	}
+	long long done = 0;
+	while (!stop) {
+		long long want = R->total >= 0 ? R->total - done : CH;
+		if (want <= 0) break;
+		int k = R->in->read(R->in, iq, want < CH ? (int)want : CH);
+		if (k <= 0) break;
+		done += k;
+		for (int i = 0; i < k; i++) xin[i] = iq[2 * i] + iq[2 * i + 1] * I;
+		pthread_mutex_lock(&R->mu);
+		// back-pressure: stay at most AHEAD_S of band data ahead of what processing still needs
+		while (!stop && R->nb && R->bands[0].len > (size_t)(AHEAD_S * R->f1)) pthread_cond_wait(&R->cv, &R->mu);
+		for (int bi = 0; bi < R->nb; bi++) {
+			band_t *b = &R->bands[bi];
+			size_t w = chan_stream_push(b->cs, xin, (size_t)k, yout, CH / D1 + 16);
+			if (b->len + w > b->cap) { b->cap = (b->len + w) * 2; b->buf = realloc(b->buf, sizeof(cf_t) * b->cap); }
+			memcpy(b->buf + b->len, yout, sizeof(cf_t) * w);
+			b->len += w;
+		}
+		pthread_cond_broadcast(&R->cv);
+		pthread_mutex_unlock(&R->mu);
+	}
+	pthread_mutex_lock(&R->mu);
+	R->eof = 1;
+	pthread_cond_broadcast(&R->cv);
+	pthread_mutex_unlock(&R->mu);
+	free(iq); free(xin); free(yout);
+	return NULL;
 }
 
 static void emit_sgb(const sgb_rec_t *r, double t0_ms) {
@@ -208,73 +262,74 @@ int main(int argc, char **argv) {
 	sgb_rec_t *srecs = malloc(sizeof(sgb_rec_t) * 256);
 	long long n_sgb = 0;
 
-	// skip to --start
-	const int CH = 65536;
-	float *iq = malloc(sizeof(float) * 2 * CH);
-	cf_t *xin = malloc(sizeof(cf_t) * CH), *yout = malloc(sizeof(cf_t) * (CH / D1 + 16));
-	long long skip = (long long)(start * fs), done_in = 0;
-	while (skip > 0 && !stop) {
-		int k = in->read(in, iq, skip > CH ? CH : (int)skip);
-		if (k <= 0) break;
-		skip -= k;
-	}
+	// Reader thread: pulls the input continuously and channelises it into the band streams, so a
+	// live SDR is never left waiting while a block is being processed. It stays at most AHEAD_S of
+	// band data ahead of processing (for files this is the back-pressure; for live input, falling
+	// that far behind means dropped samples, which are counted).
+	reader_t R = {.in = in, .bands = bands, .nb = nb, .fs = fs, .f1 = f1,
+	              .skip = (long long)(start * fs),
+	              .total = dur > 0 ? (long long)(dur * fs) : -1};
+	pthread_mutex_init(&R.mu, NULL);
+	pthread_cond_init(&R.cv, NULL);
+	pthread_t rth;
+	pthread_create(&rth, NULL, reader_main, &R);
+
 	double t_block = start, blk = 8.0, t_end = dur > 0 ? start + dur : INFINITY;
-	long long need_end = (long long)((t_block + blk + POST - start) * f1);   // band index (rel. to start)
 	int cap = 4096;
 	fgb_rec_t *recs = malloc(sizeof(fgb_rec_t) * cap);
 	cand_t *cands = malloc(sizeof(cand_t) * 4096);
 	long long n_cand = 0, n_acc = 0;
+	cf_t *loc[3] = {0};
+	size_t loc_cap[3] = {0};
 	clock_t tic = clock();
-	int eof = 0;
+	struct timespec w0;
+	clock_gettime(CLOCK_MONOTONIC, &w0);
 	while (!stop && t_block < t_end - 1.0) {
-		// fill until every band covers the block end
-		while (!eof && !stop && (nb == 0 || bands[0].base + (long long)bands[0].len < need_end)) {
-			long long want = isfinite(t_end) ? (long long)((t_end - start) * fs) - done_in : CH;
-			if (want <= 0) { eof = 1; break; }
-			int k = in->read(in, iq, want < CH ? (int)want : CH);
-			if (k <= 0) { eof = 1; break; }
-			done_in += k;
-			for (int i = 0; i < k; i++) xin[i] = iq[2 * i] + iq[2 * i + 1] * I;
-			for (int bi = 0; bi < nb; bi++) {
-				band_t *b = &bands[bi];
-				size_t w = chan_stream_push(b->cs, xin, (size_t)k, yout, CH / D1 + 16);
-				if (b->len + w > b->cap) { b->cap = (b->len + w) * 2; b->buf = realloc(b->buf, sizeof(cf_t) * b->cap); }
-				memcpy(b->buf + b->len, yout, sizeof(cf_t) * w);
-				b->len += w;
-			}
-		}
+		long long need_end = (long long)((t_block + blk + POST - start) * f1);   // band index (rel. to start)
+		pthread_mutex_lock(&R.mu);
+		while (!R.eof && !stop && nb > 0 && bands[0].base + (long long)bands[0].len < need_end)
+			pthread_cond_wait(&R.cv, &R.mu);
+		int eof = R.eof && bands[0].base + (long long)bands[0].len < need_end;
 		double t_stop = t_block + blk;
 		if (eof) t_stop = start + (double)(bands[0].base + (long long)bands[0].len) / f1 - POST;
 		if (t_stop > t_end) t_stop = t_end;
+		// snapshot each band from its base up to the block end
+		long long base[3];
+		size_t len[3];
+		for (int bi = 0; bi < nb; bi++) {
+			band_t *b = &bands[bi];
+			base[bi] = b->base;
+			len[bi] = b->len;
+			if (!eof && (long long)len[bi] > need_end - b->base) len[bi] = (size_t)(need_end - b->base);
+			if (len[bi] > loc_cap[bi]) { loc_cap[bi] = len[bi] + len[bi] / 2; loc[bi] = realloc(loc[bi], sizeof(cf_t) * loc_cap[bi]); }
+			memcpy(loc[bi], b->buf, sizeof(cf_t) * len[bi]);
+		}
+		long long dropped = input_dropped;
+		pthread_mutex_unlock(&R.mu);
 		if (t_stop <= t_block) break;
+
 		int nrec = 0;
 		for (int bi = 0; bi < nb; bi++) {
 			band_t *b = &bands[bi];
-			double t_y0 = start + (double)b->base / f1;
-			int nc = fgb_detect(b->buf, b->len, f1, b->mid, b->lo, b->hi, t_y0, thr, cands, 4096);
+			double t_y0 = start + (double)base[bi] / f1;
+			int nc = fgb_detect(loc[bi], len[bi], f1, b->mid, b->lo, b->hi, t_y0, thr, cands, 4096);
 			int first = nrec;
 			for (int c = 0; c < nc && nrec < cap - 64; c++) {
 				if (cands[c].t < t_block || cands[c].t >= t_stop) continue;   // owned by another block
 				fgb_rec_t *r = &recs[nrec];
-				if (!fgb_process_candidate(b->buf, b->len, f1, b->mid, t_y0, cands[c].t, cands[c].f, L, r)) continue;
+				if (!fgb_process_candidate(loc[bi], len[bi], f1, b->mid, t_y0, cands[c].t, cands[c].f, L, r)) continue;
 				r->det_snr = cands[c].snr_db;
 				r->band = b->name;
 				nrec++;
 			}
 			n_cand += nrec - first;
-			if (combine) {
-				// combine within this band only
-				int nn = fgb_combine_relays(recs + first, nrec - first, cap - first, L);
-				for (int k = nrec - first; k < nn; k++)
-					for (int j = 0; j < recs[first + k].combined; j++) recs[first + k].relay_idx[j] += 0;
-				nrec = first + nn;
-			}
+			if (combine) nrec = first + fgb_combine_relays(recs + first, nrec - first, cap - first, L);
 			for (int k = first; k < nrec; k++) {
 				emit(&recs[k], recs + first, in->start_ms, with_llr);
 				n_acc += recs[k].accept > 0;
 			}
 			if (acq) {
-				int ns = sgb_process_block(acq, b->buf, b->len, f1, b->mid, t_y0, t_block, t_stop, sgb_thr, sgb_prez, srecs, 256);
+				int ns = sgb_process_block(acq, loc[bi], len[bi], f1, b->mid, t_y0, t_block, t_stop, sgb_thr, sgb_prez, srecs, 256);
 				for (int k = 0; k < ns; k++) {
 					srecs[k].band = b->name;
 					emit_sgb(&srecs[k], in->start_ms);
@@ -282,10 +337,10 @@ int main(int argc, char **argv) {
 				}
 			}
 		}
-		// advance and trim
+		// advance and trim what no later block needs
 		t_block = t_stop;
-		need_end = (long long)((t_block + blk + POST - start) * f1);
 		long long keep_from = (long long)((t_block - PRE - start) * f1);
+		pthread_mutex_lock(&R.mu);
 		for (int bi = 0; bi < nb; bi++) {
 			band_t *b = &bands[bi];
 			if (keep_from > b->base) {
@@ -296,12 +351,26 @@ int main(int argc, char **argv) {
 				b->base += (long long)drop;
 			}
 		}
+		R.processed_to = keep_from;
+		pthread_cond_broadcast(&R.cv);
+		size_t ahead = nb ? bands[0].len : 0;
+		pthread_mutex_unlock(&R.mu);
+		struct timespec w1;
+		clock_gettime(CLOCK_MONOTONIC, &w1);
+		double wall = (w1.tv_sec - w0.tv_sec) + 1e-9 * (w1.tv_nsec - w0.tv_nsec);
 		double cpu = (double)(clock() - tic) / CLOCKS_PER_SEC;
-		fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, SGB accepted %lld  cpu %.2fx real time%s\n", t_block, n_cand, n_acc, n_sgb,
-		        cpu > 0 ? (t_block - start) / cpu : 0, input_dropped ? "  (dropped samples)" : "");
+		fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, SGB accepted %lld  cpu %.2f core-s/s, wall %.2fx real time, buffered %.1f s%s",
+		        t_block, n_cand, n_acc, n_sgb, cpu / fmax(t_block - start, 1e-9), (t_block - start) / fmax(wall, 1e-9),
+		        (double)ahead / f1, dropped ? "" : "\n");
+		if (dropped) fprintf(stderr, "  DROPPED %lld samples (%.2f s)\n", dropped, dropped / fs);
 		if (eof) break;
 	}
+	stop = 1;
+	pthread_mutex_lock(&R.mu);
+	pthread_cond_broadcast(&R.cv);
+	pthread_mutex_unlock(&R.mu);
 	in->close(in);
+	pthread_join(rth, NULL);
 	out_close();
 	return 0;
 }
