@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Mike Brown
 // SPDX-License-Identifier: GPL-3.0-or-later
-// JSON line output: a small string builder plus the sinks (stdout, UDP). Thread-safe emit.
+// JSON line output: a small string builder plus the sinks (stdout, UDP, daily archive). Thread-safe emit.
 #ifndef OUT_H
 #define OUT_H
 
@@ -19,6 +19,9 @@ void jb_free(jbuf_t *b);
 // comma-separated or one per call, up to 8.
 int out_add_udp(const char *list);  // 0 ok
 int out_init(int to_stdout);
+// Archive sink: every record is appended to DIR/meosar-YYYY-MM-DD.jsonl (UTC day by the wall
+// clock), opened and flushed per record so a reader always sees whole lines. 0 ok.
+int out_set_archive(const char *dir);
 // Writes one record (a JSON object without trailing newline) to every sink.
 void out_emit(const char *json);
 void out_close(void);

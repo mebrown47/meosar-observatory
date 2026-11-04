@@ -3,3 +3,6 @@ data/
 __pycache__/
 *.cs16
 *.sigmf-data
+build-install/
+build-install.log
+build-test/

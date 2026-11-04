@@ -54,7 +54,8 @@ static void usage(void) {
 	        "  --no-combine     no relay combining         --no-llr  leave soft bits out of records\n"
 	        "  --no-sgb         FGB only                   --sgb-threads N (4)  --sgb-span HZ (8000)\n"
 	        "  --sgb-thr Z (19) acquisition threshold      --sgb-prez Z (7) preamble threshold\n"
-	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n");
+	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n"
+	        "  --archive DIR    also append records to DIR/meosar-YYYY-MM-DD.jsonl (UTC day)\n");
 }
 
 static const char *tier(int a) { return a == 2 ? "single" : a == 1 ? "weak" : ""; }
@@ -196,7 +197,7 @@ int main(int argc, char **argv) {
 	static struct option lo[] = {
 		{"start", 1, 0, 1}, {"dur", 1, 0, 2}, {"bands", 1, 0, 3}, {"thr", 1, 0, 4}, {"L", 1, 0, 5},
 		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"no-sgb", 0, 0, 8}, {"sgb-threads", 1, 0, 9},
-		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
 	int o;
 	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qh", lo, NULL)) != -1) {
 		switch (o) {
@@ -220,6 +221,7 @@ int main(int argc, char **argv) {
 		case 10: sgb_span = atof(optarg); break;
 		case 11: sgb_thr = atof(optarg); break;
 		case 12: sgb_prez = atof(optarg); break;
+		case 13: if (out_set_archive(optarg)) return 1; break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}

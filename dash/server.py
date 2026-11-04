@@ -104,18 +104,40 @@ def sgb_fields(hexs: str):
 
 # ---------- readers ----------
 
+def _epoch(utc):
+    try:
+        return dt.datetime.fromisoformat(utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def day_globs(pat: str):
+    """{today}, {yesterday}: the UTC dates, for the receiver's daily archive files."""
+    now = dt.datetime.now(dt.timezone.utc)
+    return pat.replace("{today}", now.strftime("%Y-%m-%d")).replace(
+        "{yesterday}", (now - dt.timedelta(days=1)).strftime("%Y-%m-%d"))
+
+
 def read_jsonl(patterns):
+    """Records from the files the patterns match. A record with a UTC time gets t_cw and t on the
+    UTC clock, so files from several receiver runs (each counting from its own start) group right."""
     out = []
     for pat in patterns:
-        for f in sorted(glob.glob(exp(pat))):
+        for f in sorted(glob.glob(exp(day_globs(pat)))):
             try:
                 with open(f) as fh:
                     for line in fh:
                         if line.startswith("{"):
                             try:
-                                out.append(json.loads(line))
+                                r = json.loads(line)
                             except ValueError:
-                                pass
+                                continue
+                            e = _epoch(r.get("utc"))
+                            if e is not None:
+                                for k in ("t_cw", "t"):
+                                    if k in r:
+                                        r[k] = e
+                            out.append(r)
             except OSError:
                 pass
     return out
@@ -371,6 +393,8 @@ def main():
         def do_GET(self):
             if self.path.split("?")[0] in ("/", "/index.html"):
                 body, ctype = page, "text/html; charset=utf-8"
+            elif self.path == "/healthz":
+                body, ctype = b"ok\n", "text/plain"
             elif self.path.startswith("/api/state"):
                 cfg = json.load(open(a.config))
                 body, ctype = json.dumps(state(cfg)).encode(), "application/json"

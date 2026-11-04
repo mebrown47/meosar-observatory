@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static void reserve(jbuf_t *b, size_t extra) {
@@ -64,6 +66,29 @@ void fnv36(const char *s, char out[8]) {
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int use_stdout = 1;
+static char arch_dir[512]; static FILE *arch_fp; static char arch_day[16];
+
+int out_set_archive(const char *dir) {
+	struct stat st;
+	if (stat(dir, &st) || !S_ISDIR(st.st_mode)) { fprintf(stderr, "--archive %s: not a directory\n", dir); return -1; }
+	if (access(dir, W_OK)) { fprintf(stderr, "--archive %s: not writable\n", dir); return -1; }
+	snprintf(arch_dir, sizeof arch_dir, "%s", dir);
+	return 0;
+}
+
+// Called with the lock held. Rolls over to a new file at UTC midnight.
+static void archive_write(const char *json) {
+	char day[16]; time_t now = time(NULL); struct tm tm; gmtime_r(&now, &tm);
+	strftime(day, sizeof day, "%Y-%m-%d", &tm);
+	if (!arch_fp || strcmp(day, arch_day)) {
+		if (arch_fp) fclose(arch_fp);
+		char path[600]; snprintf(path, sizeof path, "%s/meosar-%s.jsonl", arch_dir, day);
+		arch_fp = fopen(path, "a");
+		if (!arch_fp) { perror(path); return; }
+		snprintf(arch_day, sizeof arch_day, "%s", day);
+	}
+	fputs(json, arch_fp); fputc('\n', arch_fp); fflush(arch_fp);
+}
 
 // UDP destinations, such as a local acarshub and an aggregator. A name that does not resolve yet
 // (at boot, before the network is up) is tried again every 10 s, on a thread of its own so a slow
@@ -136,6 +161,7 @@ int out_init(int to_stdout) {
 void out_emit(const char *json) {
 	pthread_mutex_lock(&lock);
 	if (use_stdout) { fputs(json, stdout); fputc('\n', stdout); fflush(stdout); }
+	if (arch_dir[0]) archive_write(json);
 	// One datagram per record and destination; MSG_DONTWAIT so a stalled network never holds up decoding.
 	for (int i = 0; i < ndests; i++) {
 		udp_dest_t *d = &dests[i];

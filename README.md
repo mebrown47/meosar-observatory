@@ -28,3 +28,19 @@ cmake -S . -B build && cmake --build build -j
 One JSON record per burst candidate. Records include beacon IDs and positions, which can belong
 to real distress beacons: keep them on the station unless the beacon is a test, system or
 orbitography beacon.
+
+## Install as a station (systemd)
+
+```bash
+./install.sh            # asks for source, gain, bias-tee, station name; --help for the rest
+./install.sh --update   # pull, rebuild, test, reinstall, restart
+```
+
+This installs the receiver (`meosar-rx.service`, daily archive in `/var/lib/meosar-rx/archive`),
+the public dashboard on :8896 (`meosar-dash`), the full-detail view on 127.0.0.1:8897 only
+(`meosar-dash-full`) and a daily timer that compresses and expires the archive. Settings are in
+`/etc/meosar-rx.conf`; the dashboard's datasets in `/var/lib/meosar-rx/dash.json`.
+
+One SDR serves one program. If another service here (iridium-sniffer, say) uses the same SDR,
+the installer can make them take turns: `sudo systemctl start meosar-rx` stops the other, and
+starting the other stops meosar-rx.
