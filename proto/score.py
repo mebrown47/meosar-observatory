@@ -6,15 +6,17 @@ ours = [json.loads(l) for l in open(sys.argv[2]) if l.startswith('{"t"')]
 def match(t, tol=0.08):
     return next((b for b in T if abs(b["t_cw"] - t) < tol), None)
 res = {"single": [0, 0], "weak": [0, 0]}
-got = set()
+got, full = set(), set()
 for r in ours:
     if not r.get("accept") or "t_cw" not in r: continue
     b = match(r["t_cw"])
-    good = b is not None and r["hex"] == b["hex"]
+    good = b is not None and r["hex"][:15] == b["hex"][:15]      # beacon ID (BCH-1 protected)
     res[r["accept"]][0 if good else 1] += 1
-    if good: got.add(b["t_cw"])
+    if good:
+        got.add(b["t_cw"])
+        if r["hex"] == b["hex"]: full.add(b["t_cw"])
 n = len(T)
-line = f"C/N0 {truth['cn0']:4.1f}  ours: decoded {len(got)}/{n}  single ok {res['single'][0]} wrong {res['single'][1]}  weak ok {res['weak'][0]} wrong {res['weak'][1]}"
+line = f"C/N0 {truth['cn0']:4.1f}  ours: decoded {len(got)}/{n} (full frame {len(full)})  single ok {res['single'][0]} wrong {res['single'][1]}  weak ok {res['weak'][0]} wrong {res['weak'][1]}"
 if len(sys.argv) > 3:
     txt = open(sys.argv[3]).read()
     # dec406_fgb_iq: "[t s] BURST ..." followed by a decode or a failure line

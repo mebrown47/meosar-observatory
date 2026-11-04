@@ -271,7 +271,7 @@ int fgb_process_candidate(const cf_t *y, size_t n, double f1, double mid, double
 
 int fgb_accept(const fgb_rec_t *r) {
 	if (!r->frame.ok) return 0;
-	if (r->ebn0 >= 1.5 && r->sync >= 1.3 && r->frame.bch1_flips <= 3 && r->frame.bch2_flips <= 2) return 2;
+	if (r->ebn0 >= 1.5 && r->sync >= 1.3 && r->frame.bch1_flips <= 3) return 2;   // ID from BCH-1; PDF-2 flagged separately
 	if (r->ebn0 >= 0.0 && r->sync >= 1.0) return 1;
 	return 0;
 }

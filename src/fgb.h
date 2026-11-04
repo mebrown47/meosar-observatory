@@ -29,6 +29,7 @@ typedef struct {
 	int long_frame, selftest;
 	double bch1_cost, bch2_cost;
 	int bch1_flips, bch2_flips;
+	int pdf2;             // long frames: 1 BCH-2 corrected within t=2, 2 doubtful (more flips or none); 0 n/a
 	char reasons[160];    // why not ok, "; "-separated
 } fgb_frame_t;
 

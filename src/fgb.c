@@ -152,12 +152,15 @@ void fgb_decode_soft(const double *llr, int L, fgb_frame_t *f) {
 	f->selftest = ds < dn;
 	char tmp[64];
 	int dmin = dn < ds ? dn : ds;
-	if (dmin > 1) {
+	uint8_t c1[82];
+	int have1 = bch_chase(&B1, llr + 24, L, c1, &f->bch1_cost, &f->bch1_flips);
+	// Frame sync: at most 1 of 9 bits wrong, or 2 when BCH-1 found a strong codeword (<= 3 flips,
+	// within its guaranteed correction), which noise rarely produces.
+	if (dmin > 2 || (dmin == 2 && !(have1 && f->bch1_flips <= 3))) {
 		snprintf(tmp, sizeof tmp, "sync errors %d", dmin);
 		add_reason(f, tmp);
 	}
-	uint8_t c1[82];
-	if (!bch_chase(&B1, llr + 24, L, c1, &f->bch1_cost, &f->bch1_flips)) {
+	if (!have1) {
 		add_reason(f, "bch1 no codeword");
 		return;
 	}
@@ -169,12 +172,17 @@ void fgb_decode_soft(const double *llr, int L, fgb_frame_t *f) {
 		if (fgb_is_orbitography(f->bits)) {
 			memcpy(f->bits + 106, hard + 106, 38);   // not BCH-2 protected
 		} else {
+			// BCH-1 alone carries the beacon ID; a doubtful PDF-2 is kept and flagged, not fatal.
 			uint8_t c2[38];
-			if (!bch_chase(&B2, llr + 106, L < 8 ? L : 8, c2, &f->bch2_cost, &f->bch2_flips)) {
-				add_reason(f, "bch2 no codeword");
-				return;
+			if (bch_chase(&B2, llr + 106, L < 8 ? L : 8, c2, &f->bch2_cost, &f->bch2_flips)) {
+				memcpy(f->bits + 106, c2, 38);
+				f->pdf2 = f->bch2_flips <= 2 ? 1 : 2;
+			} else {
+				memcpy(f->bits + 106, hard + 106, 38);
+				f->bch2_flips = -1;
+				f->bch2_cost = 0;
+				f->pdf2 = 2;
 			}
-			memcpy(f->bits + 106, c2, 38);
 		}
 	} else {
 		f->nbits = 112;

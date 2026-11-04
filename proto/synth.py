@@ -12,6 +12,8 @@ import numpy as np
 
 import dsp
 import fgb
+
+SCALE = 16   # output = 16 x (recorded noise + burst), see the rounding note below
 from run import QUIET, meta_of
 from pathlib import Path
 
@@ -73,8 +75,10 @@ def main():
                     continue
                 x[lo - n0s:hi - n0s] += (amp * s[lo - i0:hi - i0]).astype(np.complex64)
             out = np.empty(2 * len(x), dtype=np.int16)
-            out[0::2] = np.clip(np.round(x.real), -32768, 32767)
-            out[1::2] = np.clip(np.round(x.imag), -32768, 32767)
+            # Scale before rounding: the source noise is already integer, so round(noise + s) would be
+            # noise + round(s) and quantise a weak burst on its own (about -2 dB at 1.5 counts).
+            out[0::2] = np.clip(np.round(SCALE * x.real), -32768, 32767)
+            out[1::2] = np.clip(np.round(SCALE * x.imag), -32768, 32767)
             out.tofile(fo)
     json.dump({"cn0": a.cn0, "fs": fs, "fc": fc, "n0": n0, "amp": amp, "bursts": truth},
               open(a.out + ".truth.json", "w"), indent=0)

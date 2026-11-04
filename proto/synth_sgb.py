@@ -25,6 +25,7 @@ for k in range(a.n):
     s = sgb_rx.baseband(cw, fs, f_off=f - fc, phase0=rng.uniform(0, 6.28), fdot=rng.uniform(-5, 5))
     i0 = int(t0 * fs); x[i0:i0 + len(s)] += (amp * s).astype(np.complex64)
     truth.append({"t": round(t0, 6), "f_hz": round(f, 1), "hex": sgb.to_hex252(cw)})
-o = np.empty(2 * len(x), dtype=np.int16); o[0::2] = np.clip(np.round(x.real), -32768, 32767); o[1::2] = np.clip(np.round(x.imag), -32768, 32767)
+# scale before rounding (the noise is integer: round(noise + s) would quantise the burst on its own)
+o = np.empty(2 * len(x), dtype=np.int16); o[0::2] = np.clip(np.round(16 * x.real), -32768, 32767); o[1::2] = np.clip(np.round(16 * x.imag), -32768, 32767)
 o.tofile(a.out + ".cs16"); json.dump({"cn0": a.cn0, "bursts": truth}, open(a.out + ".truth.json", "w"))
 print(f"{a.out}: {a.n} SGB bursts at {a.cn0} dB-Hz")

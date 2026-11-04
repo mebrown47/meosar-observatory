@@ -85,6 +85,7 @@ static void emit(const fgb_rec_t *r, const fgb_rec_t *all, double t0_ms, int wit
 	jb_printf(&b, ", \"cost\": %.2f, \"flips\": [%d, %d], \"reasons\": ", isfinite(r->frame.bch1_cost) ? r->frame.bch1_cost + r->frame.bch2_cost : -1.0,
 	          r->frame.bch1_flips, r->frame.bch2_flips);
 	jb_str(&b, r->frame.reasons);
+	jb_printf(&b, ", \"pdf2\": \"%s\"", r->frame.pdf2 == 1 ? "ok" : r->frame.pdf2 == 2 ? "doubtful" : "none");
 	jb_printf(&b, ", \"accept\": \"%s\"", tier(r->accept));
 	if (t0_ms > 0) {
 		double ms = t0_ms + r->t_cw * 1000;
