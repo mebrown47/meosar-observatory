@@ -1,17 +1,49 @@
 {
-  "station": "ESG-KATL (Atlanta)",
-  "record_log": "~/meosar-p0/record.log",
-  "record_dir": "~/meosar-p0/rec",
-  "passes": "~/meosar-p0/passes.json",
-  "datasets": [
-    {"name": "Morning 1 · 12:47–13:17 UTC", "fgb": ["~/meosar-rx/out/v2_am1_*.jsonl"], "sgb": [],
-     "note": "Python prototype, SGB not searched yet"},
-    {"name": "Morning 2 · 13:17–13:47 UTC", "fgb": ["~/meosar-rx/out/c_am2.jsonl"], "sgb": ["~/meosar-rx/out/sgb_am2_*.jsonl"],
-     "note": "C receiver (FGB); SGB searched 13:22–13:32 UTC with the Python prototype"},
-    {"name": "Afternoon · 17:50–20:50 UTC", "fgb": ["~/meosar-rx/out/pm_*.jsonl"], "sgb": ["~/meosar-rx/out/pm_*.jsonl"],
-     "note": "best satellite geometry; processed as chunks finish"}
-  ],
-  "scoreboards": {
-    "FGB, corrected calibration": "~/meosar-rx/syn2cal/c*.score"
+ "station": "ESG-KATL (Atlanta)",
+ "record_log": "~/meosar-p0/record.log",
+ "record_dir": "~/meosar-p0/rec",
+ "passes": "~/meosar-p0/passes.json",
+ "datasets": [
+  {
+   "name": "Morning 1 \u00b7 12:47\u201313:17 UTC",
+   "fgb": [
+    "~/meosar-rx/out/v2_am1_*.jsonl"
+   ],
+   "sgb": [],
+   "note": "Python prototype, SGB not searched yet"
+  },
+  {
+   "name": "Morning 2 \u00b7 13:17\u201313:47 UTC",
+   "fgb": [
+    "~/meosar-rx/out/c_am2.jsonl"
+   ],
+   "sgb": [
+    "~/meosar-rx/out/sgb_am2_*.jsonl"
+   ],
+   "note": "C receiver (FGB); SGB searched 13:22\u201313:32 UTC with the Python prototype"
+  },
+  {
+   "name": "Afternoon \u00b7 17:50\u201320:50 UTC",
+   "fgb": [
+    "~/meosar-rx/out/pm_*.jsonl"
+   ],
+   "sgb": [
+    "~/meosar-rx/out/pm_*.jsonl"
+   ],
+   "note": "best satellite geometry; processed as chunks finish"
+  },
+  {
+   "name": "Live on the R2 \u00b7 from 01:35 UTC",
+   "fgb": [
+    "~/meosar-rx/out/live_20261104T0135Z.jsonl"
+   ],
+   "sgb": [
+    "~/meosar-rx/out/live_20261104T0135Z.jsonl"
+   ],
+   "note": "C receiver, live input, FGB + SGB, 2 h test"
   }
+ ],
+ "scoreboards": {
+  "FGB, corrected calibration": "~/meosar-rx/syn2cal/c*.score"
+ }
 }
