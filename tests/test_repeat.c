@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Repeat combining on synthetic soft bursts: weak repeats decode together, a weak burst of a
-// confirmed beacon is matched to it, and noise yields nothing.
+// confirmed beacon is matched to it, siblings are kept apart, and noise yields nothing.
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,7 +78,38 @@ int main(void) {
 		fgb_repeat_free(R);
 	}
 
-	// 3. Noise: no decodes, no matches.
+	// 3. A family: two known beacons with consecutive serials, codewords 7 bits apart, both weak
+	//    (-2 dB) and interleaved. No burst may be credited to the wrong sibling.
+	{
+		uint8_t x[FGB_BITS], y[FGB_BITS];
+		fgb_build("8C9EF9C0011A2A0D8E7A11CC54D691", x);
+		fgb_build("8C9EF9C0031A2A09C2EA154E4CD6D3", y);
+		int wrong = 0, right = 0;
+		for (int trial = 0; trial < 20; trial++) {
+			fgb_repeat_t *R = fgb_repeat_new(1200, 10);
+			fgb_rec_t r;
+			burst(x, 8.0, 0, &r);  fgb_repeat_block(R, &r, 1, out, 16);
+			burst(y, 8.0, 5, &r);  fgb_repeat_block(R, &r, 1, out, 16);
+			for (int i = 1; i <= 24; i++)
+				for (int w = 0; w < 2; w++) {
+					double t = 50.0 * i + 20 * w;   // x on the 50 s, y 20 s later
+					burst(w ? y : x, -2.0, t, &r); r.accept = 0;
+					int n = fgb_repeat_block(R, &r, 1, out, 16);
+					for (int j = 0; j < n; j++) {
+						int is_x = !memcmp(out[j].frame.bits + 24, x + 24, 82);
+						for (int m = 0; m < out[j].nmem; m++) {
+							int from_x = fmod(out[j].mem[m].t_cw, 50.0) < 10;
+							if (is_x == from_x) right++; else wrong++;
+						}
+					}
+				}
+			fgb_repeat_free(R);
+		}
+		printf("family 7 bits apart at -2 dB: %d bursts credited to the right sibling, %d to the wrong one\n", right, wrong);
+		if (wrong > right / 100) fails++;
+	}
+
+	// 4. Noise: no decodes, no matches.
 	{
 		fgb_repeat_t *R = fgb_repeat_new(1200, 10);
 		fgb_rec_t r;

@@ -12,6 +12,7 @@
 #define Z_PAIR 5.0              // a pair links this strongly: two bursts may decode together
 #define Z_LINK 4.0              // weaker links count only in groups of three bursts or more
 #define Z_MEMBER 3.0
+#define LODDS_CLUSTER 6.9      // ln 1000: a cluster decode against every other known codeword
 #define SAME_BURST_S 1.5        // closer than this: the same transmission
 #define MAX_KNOWN 2048
 #define MAX_WEAK 1024
@@ -143,6 +144,24 @@ static double pair_z(const unit_t *a, const unit_t *b) {
 	return d * sqrt((double)SEGN);
 }
 
+// Log-likelihood ratio of codeword s against the likeliest other known codeword, from calibrated
+// LLRs (2 mu r / sigma^2): sum over the bits where they differ of llr * s. +1e9 when there is none.
+// Unlike z, which is capped at sqrt(82) (a perfect burst of one beacon still scores 7.5 against a
+// sibling 7 bits away), it keeps growing with the evidence. Beacons of one family (consecutive
+// serials) have codewords only 7-12 bits apart.
+static double lodds_vs_known(const fgb_repeat_t *R, const double *llr, const float *s) {
+	double worst = 1e9;
+	for (int k = 0; k < R->nk; k++) {
+		const float *o = R->known[k].s;
+		double lo = 0;
+		int d = 0;
+		for (int i = 0; i < SEGN; i++)
+			if (o[i] != s[i]) { lo += llr[SEG0 + i] * s[i]; d++; }
+		if (d && lo < worst) worst = lo;
+	}
+	return worst;
+}
+
 // Try to decode the new unit u together with earlier unmatched units. On success fills *out,
 // removes the members from the pool and returns 1.
 static int try_cluster(fgb_repeat_t *R, const unit_t *u, fgb_rep_t *out) {
@@ -161,21 +180,40 @@ static int try_cluster(fgb_repeat_t *R, const unit_t *u, fgb_rep_t *out) {
 			if (!have && fabs(R->pool[i].t_cw - u->t_cw) > SAME_BURST_S && pair_z(&R->pool[idx[a]], &R->pool[i]) >= Z_PAIR)
 				idx[ni++] = i;
 		}
-	// Noise pairs reach Z_LINK now and then (p ~ 3e-5 each); two of them on one burst are rare.
-	if (!strong && ni < 2) return 0;
-	double sum[FGB_BITS];
-	memcpy(sum, u->llr, sizeof sum);
-	for (int k = 0; k < ni; k++)
-		for (int b = 0; b < FGB_BITS; b++) sum[b] += R->pool[idx[k]].llr[b];
 	fgb_frame_t f;
-	fgb_decode_soft(sum, R->L, &f);
-	if (!f.ok || f.bch1_flips > 3 || f.pdf2 == 2) return 0;   // PDF-2 doubtful (orbitography has none)
 	float s[SEGN];
-	codeword(&f, s);
-	// every member must match the decoded codeword on its own
-	if (zscore(u->llr, s) < Z_MEMBER) return 0;
-	for (int k = 0; k < ni; k++)
-		if (zscore(R->pool[idx[k]].llr, s) < Z_MEMBER) return 0;
+	for (;;) {
+		// Noise pairs reach Z_LINK now and then (p ~ 3e-5 each); two of them on one burst are rare.
+		if (!ni || (!strong && ni < 2)) return 0;
+		double sum[FGB_BITS];
+		memcpy(sum, u->llr, sizeof sum);
+		for (int k = 0; k < ni; k++)
+			for (int b = 0; b < FGB_BITS; b++) sum[b] += R->pool[idx[k]].llr[b];
+		fgb_decode_soft(sum, R->L, &f);
+		if (!f.ok || f.bch1_flips > 3 || f.pdf2 == 2) return 0;   // PDF-2 doubtful (orbitography has none)
+		codeword(&f, s);
+		// Every member must match the decoded codeword on its own, and prefer it to every other
+		// known codeword (log-odds >= 0; a weak burst cannot do more than that against a sibling).
+		// Members that prefer another beacon are left out and the rest tried again; if u itself
+		// does, nothing stands.
+		if (zscore(u->llr, s) < Z_MEMBER || lodds_vs_known(R, u->llr, s) < 0) return 0;
+		int nk = 0;
+		for (int k = 0; k < ni; k++) {
+			const double *l = R->pool[idx[k]].llr;
+			double z = zscore(l, s);
+			if (z >= Z_MEMBER && lodds_vs_known(R, l, s) >= 0) idx[nk++] = idx[k];
+		}
+		if (nk == ni) {
+			// The cluster as a whole must favour the decoded codeword over every other known
+			// beacon's by odds of 1000:1: a family's bursts summed together decode to one
+			// sibling or another.
+			if (lodds_vs_known(R, sum, s) < LODDS_CLUSTER) return 0;
+			break;
+		}
+		ni = nk;
+		strong = 0;
+		for (int k = 0; k < ni; k++) strong |= pair_z(u, &R->pool[idx[k]]) >= Z_PAIR;
+	}
 	memset(out, 0, sizeof *out);
 	out->kind = 2; out->frame = f;
 	const unit_t *all[FGB_REP_MAXMEM];

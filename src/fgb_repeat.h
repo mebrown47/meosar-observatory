@@ -7,9 +7,13 @@
 //     beacon (z = sum(L s) / |L|, ~N(0,1) when unrelated); z >= 6, beating every other beacon by 2,
 //     attributes the burst to that beacon, however weak it is.
 //  2. Unknown beacons. Unmatched bursts are kept for a window (20 min). A new one that correlates
-//     with earlier ones (pairwise z >= 5, or >= 4 in a group of three bursts or more) is summed with them and decoded; the result stands only
-//     if every member also matches the decoded codeword on its own (z >= 3), so two similar
-//     beacons are not merged, and BCH-1 needs at most 3 flips and PDF-2, where there is one, decodes.
+//     with earlier ones (pairwise z >= 5, or >= 4 in a group of three bursts or more) is summed
+//     with them and decoded. Every member must match the decoded codeword on its own (z >= 3) and
+//     favour it over every other known beacon's (log-likelihood ratio >= 0); members that favour
+//     another are left out and the rest decoded again. The result stands if the sum favours it
+//     over every other known beacon by odds of 1000:1, BCH-1 needs at most 3 flips, and PDF-2,
+//     where there is one, decodes. (Beacons of one family, consecutive serials, have codewords
+//     only 7-12 bits apart: their weak bursts link and sum together.)
 //
 // A burst is a relay-combined record, or a relay that was not combined with others.
 #ifndef MEOSAR_FGB_REPEAT_H
