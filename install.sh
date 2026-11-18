@@ -165,10 +165,12 @@ fi
 
 # ---- build + test -----------------------------------------------------------
 # Built here for this machine's CPU (-march=native): the FFTs are most of the work.
+# Always from clean: source copied in with its own timestamps (rsync -a, a tarball) can look
+# older than the last build, and make would keep the stale objects.
 info "Building"
 mkdir -p "$BUILD_DIR"
 cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release > "$BUILD_DIR.log" 2>&1 \
-  && cmake --build "$BUILD_DIR" -j"$(nproc)" >> "$BUILD_DIR.log" 2>&1 \
+  && cmake --build "$BUILD_DIR" --clean-first -j"$(nproc)" >> "$BUILD_DIR.log" 2>&1 \
   || { tail -20 "$BUILD_DIR.log"; die "build failed — full log: $BUILD_DIR.log"; }
 BIN="$BUILD_DIR/meosar-rx"
 ok "built $BIN"
