@@ -149,13 +149,13 @@ static void emit_rep(const fgb_rep_t *o, double t0_ms) {
 	          o->kind == 1 ? "fgb_match" : "fgb_repeat", last->band, last->t_cw, last->f_hz, last->ebn0);
 	jb_printf(&b, ", \"hex\": \"%s\", \"long\": %s", hex, o->frame.long_frame ? "true" : "false");
 	if (o->kind == 1) {
-		jb_printf(&b, ", \"z\": %.1f, \"z2\": %.1f", o->z, o->z2);
+		jb_printf(&b, ", \"z\": %.1f, \"z2\": %.1f, \"lodds\": %.1f", o->z, o->z2, o->lodds);
 	} else {
-		jb_printf(&b, ", \"flips\": [%d, %d], \"bursts\": %d, \"members\": [", o->frame.bch1_flips, o->frame.bch2_flips, o->bursts);
+		jb_printf(&b, ", \"flips\": [%d, %d], \"bursts\": %d, \"lodds\": %.1f, \"members\": [", o->frame.bch1_flips, o->frame.bch2_flips, o->bursts, o->lodds);
 		for (int k = 0; k < o->nmem; k++) {
 			const fgb_rep_member_t *m = &o->mem[k];
-			jb_printf(&b, "%s{\"band\": \"%s\", \"t_cw\": %.6f, \"f_hz\": %.1f, \"ebn0\": %.2f, \"z\": %.1f", k ? ", " : "",
-			          m->band, m->t_cw, m->f_hz, m->ebn0, m->z);
+			jb_printf(&b, "%s{\"band\": \"%s\", \"t_cw\": %.6f, \"f_hz\": %.1f, \"ebn0\": %.2f, \"z\": %.1f, \"lodds\": %.1f", k ? ", " : "",
+			          m->band, m->t_cw, m->f_hz, m->ebn0, m->z, m->lodds);
 			jb_utc(&b, t0_ms, m->t_cw);
 			jb_raw(&b, "}");
 		}

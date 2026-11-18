@@ -84,7 +84,7 @@ int main(void) {
 		uint8_t x[FGB_BITS], y[FGB_BITS];
 		fgb_build("8C9EF9C0011A2A0D8E7A11CC54D691", x);
 		fgb_build("8C9EF9C0031A2A09C2EA154E4CD6D3", y);
-		int wrong = 0, right = 0;
+		int wrong = 0, right = 0, by_match = 0;
 		for (int trial = 0; trial < 20; trial++) {
 			fgb_repeat_t *R = fgb_repeat_new(1200, 10);
 			fgb_rec_t r;
@@ -100,12 +100,13 @@ int main(void) {
 						for (int m = 0; m < out[j].nmem; m++) {
 							int from_x = fmod(out[j].mem[m].t_cw, 50.0) < 10;
 							if (is_x == from_x) right++; else wrong++;
+							by_match += out[j].kind == 1;
 						}
 					}
 				}
 			fgb_repeat_free(R);
 		}
-		printf("family 7 bits apart at -2 dB: %d bursts credited to the right sibling, %d to the wrong one\n", right, wrong);
+		printf("family 7 bits apart at -2 dB: %d bursts credited to the right sibling (%d by matching), %d to the wrong one\n", right, by_match, wrong);
 		if (wrong > right / 100) fails++;
 	}
 

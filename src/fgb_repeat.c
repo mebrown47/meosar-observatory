@@ -8,11 +8,12 @@
 #define SEG0 24                 // BCH-1 codeword: bits 24..105 (0-based)
 #define SEGN 82
 #define Z_KNOWN 6.0
-#define Z_MARGIN 2.0            // the match must beat the runner-up by this much
 #define Z_PAIR 5.0              // a pair links this strongly: two bursts may decode together
 #define Z_LINK 4.0              // weaker links count only in groups of three bursts or more
 #define Z_MEMBER 3.0
-#define LODDS_CLUSTER 6.9      // ln 1000: a cluster decode against every other known codeword
+#define LODDS_MIN 6.9          // ln 1000: a match, or a cluster decode, against every other known codeword
+#define LLR_CLIP 6.0            // per bit, in log-likelihood ratios: on strict decodes, bits with |LLR|
+                                // 6-9 are wrong 0.3% of the time (worth ~5.8, not 6-9)
 #define SAME_BURST_S 1.5        // closer than this: the same transmission
 #define MAX_KNOWN 2048
 #define MAX_WEAK 1024
@@ -145,7 +146,8 @@ static double pair_z(const unit_t *a, const unit_t *b) {
 }
 
 // Log-likelihood ratio of codeword s against the likeliest other known codeword, from calibrated
-// LLRs (2 mu r / sigma^2): sum over the bits where they differ of llr * s. +1e9 when there is none.
+// LLRs (2 mu r / sigma^2): sum over the bits where they differ of llr * s, each bit clipped at
+// LLR_CLIP (the demodulator is overconfident beyond it). +1e9 when there is none.
 // Unlike z, which is capped at sqrt(82) (a perfect burst of one beacon still scores 7.5 against a
 // sibling 7 bits away), it keeps growing with the evidence. Beacons of one family (consecutive
 // serials) have codewords only 7-12 bits apart.
@@ -156,7 +158,7 @@ static double lodds_vs_known(const fgb_repeat_t *R, const double *llr, const flo
 		double lo = 0;
 		int d = 0;
 		for (int i = 0; i < SEGN; i++)
-			if (o[i] != s[i]) { lo += llr[SEG0 + i] * s[i]; d++; }
+			if (o[i] != s[i]) { lo += fmax(-LLR_CLIP, fmin(LLR_CLIP, llr[SEG0 + i])) * s[i]; d++; }
 		if (d && lo < worst) worst = lo;
 	}
 	return worst;
@@ -182,6 +184,7 @@ static int try_cluster(fgb_repeat_t *R, const unit_t *u, fgb_rep_t *out) {
 		}
 	fgb_frame_t f;
 	float s[SEGN];
+	double cl_lodds = 0;
 	for (;;) {
 		// Noise pairs reach Z_LINK now and then (p ~ 3e-5 each); two of them on one burst are rare.
 		if (!ni || (!strong && ni < 2)) return 0;
@@ -207,7 +210,8 @@ static int try_cluster(fgb_repeat_t *R, const unit_t *u, fgb_rep_t *out) {
 			// The cluster as a whole must favour the decoded codeword over every other known
 			// beacon's by odds of 1000:1: a family's bursts summed together decode to one
 			// sibling or another.
-			if (lodds_vs_known(R, sum, s) < LODDS_CLUSTER) return 0;
+			cl_lodds = lodds_vs_known(R, sum, s);
+			if (cl_lodds < LODDS_MIN) return 0;
 			break;
 		}
 		ni = nk;
@@ -215,7 +219,7 @@ static int try_cluster(fgb_repeat_t *R, const unit_t *u, fgb_rep_t *out) {
 		for (int k = 0; k < ni; k++) strong |= pair_z(u, &R->pool[idx[k]]) >= Z_PAIR;
 	}
 	memset(out, 0, sizeof *out);
-	out->kind = 2; out->frame = f;
+	out->kind = 2; out->frame = f; out->lodds = fmin(cl_lodds, 999);
 	const unit_t *all[FGB_REP_MAXMEM];
 	int nall = 0;
 	for (int k = 0; k < ni; k++) all[nall++] = &R->pool[idx[k]];
@@ -224,7 +228,8 @@ static int try_cluster(fgb_repeat_t *R, const unit_t *u, fgb_rep_t *out) {
 	int nd = 0;
 	for (int k = 0; k < nall; k++) {
 		const unit_t *m = all[k];
-		out->mem[out->nmem++] = (fgb_rep_member_t){m->t_cw, m->f_hz, m->ebn0, zscore(m->llr, s), m->band};
+		out->mem[out->nmem++] = (fgb_rep_member_t){m->t_cw, m->f_hz, m->ebn0, zscore(m->llr, s),
+		                                            fmin(lodds_vs_known(R, m->llr, s), 999), m->band};
 		int seen = 0;
 		for (int j = 0; j < nd; j++) if (fabs(tdist[j] - m->t_cw) <= SAME_BURST_S) seen = 1;
 		if (!seen) tdist[nd++] = m->t_cw;
@@ -263,23 +268,25 @@ int fgb_repeat_block(fgb_repeat_t *R, const fgb_rec_t *recs, int n, fgb_rep_t *o
 	for (int i = 0; i < n && nout < cap; i++) {
 		const fgb_rec_t *r = &recs[i];
 		if (!r->valid || inside[i] || decoded[i]) continue;
-		// 1. a known beacon?
-		// (Two beacons whose codewords differ in few bits, e.g. consecutive serials, correlate
-		// with each other's bursts: the best match wins, and z2 records the runner-up.)
+		// 1. a known beacon? The best correlation, if it is clearly likelier than every other known
+		// beacon (two beacons with consecutive serials correlate with each other's bursts almost
+		// as well; z2 records the runner-up's correlation).
 		int best = -1;
-		double bz = -1e9, z2 = -1e9;
+		double bz = -1e9, z2 = -1e9, lo = 0;
 		for (int k = 0; k < R->nk; k++) {
 			double z = zscore(r->llr, R->known[k].s);
 			if (z > bz) { z2 = bz; bz = z; best = k; }
 			else if (z > z2) z2 = z;
 		}
-		// Ambiguous between two similar codewords: not attributed; it may still cluster below.
-		if (bz < Z_KNOWN || bz - z2 < Z_MARGIN) best = -1;
+		if (best >= 0 && bz >= Z_KNOWN) lo = lodds_vs_known(R, r->llr, R->known[best].s);
+		// Too weak, or ambiguous between similar codewords: not attributed; it may still cluster.
+		if (bz < Z_KNOWN || lo < LODDS_MIN) best = -1;
 		if (best >= 0) {
 			fgb_rep_t *o = &out[nout++];
 			memset(o, 0, sizeof *o);
 			o->kind = 1; o->frame = R->known[best].frame; o->z = bz; o->z2 = z2 > -1e8 ? z2 : 0; o->nmem = 1; o->bursts = 1;
-			o->mem[0] = (fgb_rep_member_t){r->t_cw, r->f_hz, r->ebn0, bz, r->band};
+			o->lodds = fmin(lo, 999);
+			o->mem[0] = (fgb_rep_member_t){r->t_cw, r->f_hz, r->ebn0, bz, o->lodds, r->band};
 			R->known[best].t_last = r->t_cw;
 			continue;
 		}

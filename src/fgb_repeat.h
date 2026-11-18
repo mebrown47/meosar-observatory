@@ -4,8 +4,10 @@
 // of proto/combine.py, in streaming form):
 //
 //  1. Known beacons. A burst's soft bits are correlated with the BCH-1 codeword of each confirmed
-//     beacon (z = sum(L s) / |L|, ~N(0,1) when unrelated); z >= 6, beating every other beacon by 2,
-//     attributes the burst to that beacon, however weak it is.
+//     beacon (z = sum(L s) / |L|, ~N(0,1) when unrelated); z >= 6, with odds of 1000:1 over every
+//     other known beacon (log-likelihood ratio over the bits where the codewords differ),
+//     attributes the burst to that beacon, however weak it is. (z alone cannot tell siblings
+//     apart: it is capped at sqrt(82), and a perfect burst leads a sibling 7 bits away by 1.55.)
 //  2. Unknown beacons. Unmatched bursts are kept for a window (20 min). A new one that correlates
 //     with earlier ones (pairwise z >= 5, or >= 4 in a group of three bursts or more) is summed
 //     with them and decoded. Every member must match the decoded codeword on its own (z >= 3) and
@@ -25,6 +27,7 @@
 
 typedef struct {
 	double t_cw, f_hz, ebn0, z;
+	double lodds;             // log-likelihood ratio, this codeword against the likeliest other known one
 	const char *band;
 } fgb_rep_member_t;
 
@@ -32,6 +35,8 @@ typedef struct {
 	int kind;                 // 1: burst matched to a known beacon; 2: new frame decoded from repeats
 	fgb_frame_t frame;        // the beacon's frame (kind 1: the known beacon's last frame)
 	double z, z2;             // kind 1: correlation with the beacon's codeword, and with the runner-up's
+	double lodds;             // log-likelihood ratio against the likeliest other known codeword
+	                          // (kind 1: of the burst; kind 2: of the summed members); capped at 999
 	int nmem, bursts;         // members, and distinct transmissions among them
 	fgb_rep_member_t mem[FGB_REP_MAXMEM];
 } fgb_rep_t;
