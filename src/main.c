@@ -55,7 +55,35 @@ static void usage(void) {
 	        "  --no-sgb         FGB only                   --sgb-threads N (4)  --sgb-span HZ (8000)\n"
 	        "  --sgb-thr Z (19) acquisition threshold      --sgb-prez Z (7) preamble threshold\n"
 	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n"
-	        "  --archive DIR    also append records to DIR/meosar-YYYY-MM-DD.jsonl (UTC day)\n");
+	        "  --archive DIR    also append records to DIR/meosar-YYYY-MM-DD.jsonl (UTC day)\n"
+	        "  --stats S        a status record every S seconds of signal (and one at start); the\n"
+	        "                   progress line on stderr then also comes every S seconds, not every block\n");
+}
+
+// "utc" field for a time t (s) into the input, when the input has a start time.
+static void jb_utc(jbuf_t *b, double start_ms, double t) {
+	if (start_ms <= 0) return;
+	double ms = start_ms + t * 1000;
+	time_t sec = (time_t)(ms / 1000);
+	struct tm tm;
+	gmtime_r(&sec, &tm);
+	char ts[32];
+	strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tm);
+	jb_printf(b, ", \"utc\": \"%s.%03d+00:00\"", ts, (int)fmod(ms, 1000));
+}
+
+// Status record: what the receiver did over the last interval, so a quiet band still shows the
+// receiver is up. Counts are totals since start; the dashboard takes differences.
+static void emit_stat(const char *what, double start_ms, double t, const char *src, long long cand, long long acc,
+                      long long sgb, long long dropped, double fs, double cpu_per_s) {
+	jbuf_t b = {0};
+	jb_printf(&b, "{\"kind\": \"%s\", \"t\": %.1f", what, t);
+	jb_utc(&b, start_ms, t);
+	if (src) { jb_raw(&b, ", \"src\": "); jb_str(&b, src); }
+	jb_printf(&b, ", \"cand\": %lld, \"acc\": %lld, \"sgb\": %lld, \"dropped_s\": %.2f, \"cpu\": %.2f}",
+	          cand, acc, sgb, dropped / fs, cpu_per_s);
+	out_emit(b.s);
+	jb_free(&b);
 }
 
 static const char *tier(int a) { return a == 2 ? "single" : a == 1 ? "weak" : ""; }
@@ -193,11 +221,11 @@ int main(int argc, char **argv) {
 	const char *inspec = NULL, *fmt = NULL, *gain = NULL, *bands_s = "galileo,glonass";
 	double center = 1544.5e6, rate = 2.5e6, start = 0, dur = -1, thr = 13;
 	int L = 10, combine = 1, bias = 0, quiet = 0, with_llr = 1, do_sgb = 1, sgb_threads = 4;
-	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7;
+	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7, stats_s = 0;
 	static struct option lo[] = {
 		{"start", 1, 0, 1}, {"dur", 1, 0, 2}, {"bands", 1, 0, 3}, {"thr", 1, 0, 4}, {"L", 1, 0, 5},
 		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"no-sgb", 0, 0, 8}, {"sgb-threads", 1, 0, 9},
-		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
 	int o;
 	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qh", lo, NULL)) != -1) {
 		switch (o) {
@@ -222,6 +250,7 @@ int main(int argc, char **argv) {
 		case 11: sgb_thr = atof(optarg); break;
 		case 12: sgb_prez = atof(optarg); break;
 		case 13: if (out_set_archive(optarg)) return 1; break;
+		case 14: stats_s = atof(optarg); break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
@@ -260,6 +289,8 @@ int main(int argc, char **argv) {
 	}
 	fprintf(stderr, "meosar-rx: %s, %.0f S/s at %.4f MHz, %d band(s), threshold %.1f dB, Chase L=%d%s%s\n",
 	        in->name, fs, fc / 1e6, nb, thr, L, combine ? ", relay combining" : "", do_sgb ? ", SGB" : "");
+	if (stats_s > 0) emit_stat("start", in->start_ms, start, in->name, 0, 0, 0, 0, fs, 0);
+	double next_stat = start + stats_s;
 	sgb_acq_t *acq = do_sgb ? sgb_acq_new(f1, sgb_span, sgb_threads) : NULL;
 	sgb_rec_t *srecs = malloc(sizeof(sgb_rec_t) * 256);
 	long long n_sgb = 0;
@@ -361,10 +392,15 @@ int main(int argc, char **argv) {
 		clock_gettime(CLOCK_MONOTONIC, &w1);
 		double wall = (w1.tv_sec - w0.tv_sec) + 1e-9 * (w1.tv_nsec - w0.tv_nsec);
 		double cpu = (double)(clock() - tic) / CLOCKS_PER_SEC;
-		fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, SGB accepted %lld  cpu %.2f core-s/s, wall %.2fx real time, buffered %.1f s%s",
+		int report = stats_s <= 0 || t_block >= next_stat || eof;
+		if (stats_s > 0 && report) {
+			emit_stat("stat", in->start_ms, t_block, NULL, n_cand, n_acc, n_sgb, dropped, fs, cpu / fmax(t_block - start, 1e-9));
+			next_stat += stats_s * ceil((t_block - next_stat + 1e-9) / stats_s);
+		}
+		if (report) fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, SGB accepted %lld  cpu %.2f core-s/s, wall %.2fx real time, buffered %.1f s%s",
 		        t_block, n_cand, n_acc, n_sgb, cpu / fmax(t_block - start, 1e-9), (t_block - start) / fmax(wall, 1e-9),
 		        (double)ahead / f1, dropped ? "" : "\n");
-		if (dropped) fprintf(stderr, "  DROPPED %lld samples (%.2f s)\n", dropped, dropped / fs);
+		if (report && dropped) fprintf(stderr, "  DROPPED %lld samples (%.2f s)\n", dropped, dropped / fs);
 		if (eof) break;
 	}
 	stop = 1;

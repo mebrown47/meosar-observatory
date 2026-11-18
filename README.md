@@ -25,9 +25,8 @@ cmake -S . -B build && cmake --build build -j
 ./build/meosar-rx -i recording.sigmf-meta > records.jsonl
 ```
 
-One JSON record per burst candidate. Records include beacon IDs and positions, which can belong
-to real distress beacons: keep them on the station unless the beacon is a test, system or
-orbitography beacon.
+One JSON record per burst candidate. With `--archive DIR` records are also appended to one file
+per UTC day, and `--stats 600` adds a status record every 10 minutes.
 
 ## Install as a station (systemd)
 
@@ -37,9 +36,25 @@ orbitography beacon.
 ```
 
 This installs the receiver (`meosar-rx.service`, daily archive in `/var/lib/meosar-rx/archive`),
-the public dashboard on :8896 (`meosar-dash`), the full-detail view on 127.0.0.1:8897 only
-(`meosar-dash-full`) and a daily timer that compresses and expires the archive. Settings are in
-`/etc/meosar-rx.conf`; the dashboard's datasets in `/var/lib/meosar-rx/dash.json`.
+the MEOSAR Observatory dashboard on :8896 (`meosar-observatory`), a rollup that folds the archive
+into `/var/lib/meosar-rx/observatory.db` every minute (`meosar-rollup.timer`) and a daily timer
+that compresses and expires the raw archive. Settings are in `/etc/meosar-rx.conf`.
+
+## MEOSAR Observatory
+
+`observatory/rollup.py` merges the relayed copies of each burst into one row, decodes every
+distinct frame once (with dec406's hex decoder when it is installed: protocol, identification,
+position), and counts candidates per hour. `observatory/server.py` serves the dashboard: beacons
+of both generations with their fields and positions, bursts over time, satellites per burst, the
+receiver's status, and each beacon's burst history. A beacon is shown once it is confirmed: a
+strict decode, or bursts from two separate transmissions.
+
+Results from recordings can be added at any time:
+
+```bash
+python3 /opt/meosar-rx/observatory/rollup.py --archive /var/lib/meosar-rx/archive \
+    --db /var/lib/meosar-rx/observatory.db results/*.jsonl
+```
 
 One SDR serves one program. If another service here (iridium-sniffer, say) uses the same SDR,
 the installer can make them take turns: `sudo systemctl start meosar-rx` stops the other, and
