@@ -56,8 +56,8 @@ static void usage(void) {
 	        "  --sgb-thr Z (19) acquisition threshold      --sgb-prez Z (7) preamble threshold\n"
 	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n"
 	        "  --archive DIR    also append records to DIR/meosar-YYYY-MM-DD.jsonl (UTC day)\n"
-	        "  --stats S        a status record every S seconds of signal (and one at start); the\n"
-	        "                   progress line on stderr then also comes every S seconds, not every block\n");
+	        "  --stats S        status records: one at start, one after a minute, then every S seconds;\n"
+	        "                   the progress line on stderr then follows them instead of every block\n");
 }
 
 // "utc" field for a time t (s) into the input, when the input has a start time.
@@ -290,7 +290,7 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "meosar-rx: %s, %.0f S/s at %.4f MHz, %d band(s), threshold %.1f dB, Chase L=%d%s%s\n",
 	        in->name, fs, fc / 1e6, nb, thr, L, combine ? ", relay combining" : "", do_sgb ? ", SGB" : "");
 	if (stats_s > 0) emit_stat("start", in->start_ms, start, in->name, 0, 0, 0, 0, fs, 0);
-	double next_stat = start + stats_s;
+	double next_stat = start + fmin(60, stats_s);   // the first after a minute, so a fresh start shows soon
 	sgb_acq_t *acq = do_sgb ? sgb_acq_new(f1, sgb_span, sgb_threads) : NULL;
 	sgb_rec_t *srecs = malloc(sizeof(sgb_rec_t) * 256);
 	long long n_sgb = 0;

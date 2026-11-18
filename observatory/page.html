@@ -21,7 +21,7 @@
   .card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
   .card .v{font-size:21px;font-weight:600;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
   .card .v small{font-size:12px;color:var(--dim);font-weight:400}
-  .grid{display:grid;grid-template-columns:2fr 1fr;gap:14px}
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:14px;align-items:start}
   @media (max-width:1000px){.grid{grid-template-columns:1fr}}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px;min-width:0;overflow-x:auto}
   .panel h2{font-size:13px;margin:0 0 8px;font-weight:600;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
@@ -125,7 +125,7 @@ function activity() {
     const x = 36 + i * bw, ha = a / max * (H - 8), hb = b / max * (H - 8), w = Math.max(1, bw - 1);
     g += `<g><title>${ts(t)} UTC: ${a} FGB, ${b} SGB bursts</title><rect x="${x}" y="${H + 4 - ha}" width="${w}" height="${ha}" fill="#4aa8ff"/>` +
          `<rect x="${x}" y="${H + 4 - ha - hb}" width="${w}" height="${hb}" fill="#c297ff"/></g>`;
-    if (i % every === 0) g += `<text x="${x}" y="${H + 20}">${S.bin_s >= 86400 ? iso(t).slice(5, 10) : (S.hours > 24 || S.hours === 0) && hm(t) === "00:00" ? iso(t).slice(5, 10) : hm(t)}</text>`;
+    if (i % every === 0) g += `<text x="${x}" y="${H + 20}">${S.bin_s >= 3 * 3600 ? iso(t).slice(5, 10) : hm(t) === "00:00" ? iso(t).slice(5, 10) : hm(t)}</text>`;
   });
   $("activity").innerHTML = g + "</svg>";
 }
@@ -137,12 +137,12 @@ function rx() {
     const age = now - R.last, up = age < 1500;
     h += `<p><span class="dot ${up ? "ok" : "bad"}"></span>${up ? "Receiving" : "No status for " + ago(age)} <span class="dim">· last status ${ago(age)} ago</span></p>`;
     h += `<table><tr><td>Running since</td><td class="r">${ts(R.started)} UTC</td></tr>` +
-      `<tr><td>Source</td><td class="r mono">${esc(R.src || "")}</td></tr>` +
+      `<tr><td>Source</td><td class="r mono">${esc((R.src || "").trim())}</td></tr>` +
       `<tr><td>CPU</td><td class="r">${f1(R.cpu)} cores</td></tr>` +
       `<tr><td>Samples dropped since start</td><td class="r">${R.dropped_s ? `<span style="color:var(--warn)">${R.dropped_s.toFixed(2)} s</span>` : "none"}</td></tr>` +
       `<tr><td>Restarts in window</td><td class="r">${R.starts}</td></tr></table>`;
   } else {
-    h += `<p><span class="dot"></span>No status records yet <span class="dim">(meosar-rx --stats)</span></p>`;
+    h += `<p><span class="dot"></span>No status record yet${R.started ? ` · started ${ts(R.started)} UTC` : ""} <span class="dim">(the first comes a minute after start)</span></p>`;
   }
   const B = S.bands;
   h += `<table style="margin-top:8px"><tr><th>Band</th><th class="r">FGB candidates</th><th class="r">decoded</th><th class="r">SGB</th></tr>` +
