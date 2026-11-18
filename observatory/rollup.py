@@ -329,7 +329,13 @@ def main():
     ap.add_argument("files", nargs="*", help="more JSONL files to ingest (recordings' results)")
     a = ap.parse_args()
 
-    files = sorted(glob.glob(os.path.join(a.archive, "meosar-*.jsonl"))) + [os.path.abspath(f) for f in a.files]
+    extra = []
+    for f in a.files:
+        if os.path.isfile(f):
+            extra.append(os.path.abspath(f))
+        else:
+            print(f"rollup: skipping {f!r}: no such file", file=sys.stderr)
+    files = sorted(glob.glob(os.path.join(a.archive, "meosar-*.jsonl"))) + extra
     if not files:
         print(f"rollup: no archive files in {a.archive}", file=sys.stderr)
         return 0
