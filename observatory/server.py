@@ -11,7 +11,7 @@ Stdlib only, no external assets. Follows inmarsat-rx's observatory server.
   GET /globe            -> the globe: beacons on the left, their positions and tracks on a globe
   GET /api/overview     -> the dashboard's data (?hours=N, 0 = everything)
   GET /api/map          -> the globe's data (?hours=N)
-  GET /api/beacon?id=B  -> one beacon: decoded fields and its bursts
+  GET /api/beacon?id=B  -> one beacon: decoded fields and its bursts, with the satellites that relayed each
   GET /static/...       -> the globe's script and its vendored assets (three.js, Earth texture, coastlines)
   GET /healthz          -> ok
 
@@ -52,6 +52,56 @@ def frame_info(con, hexs):
         return {}
     return {"protocol": r[0], "btype": r[1], "country": r[2], "country_name": r[3], "ident": r[4],
             "lat": r[5], "lon": r[6], "fields": json.loads(r[7] or "[]")}
+
+
+def has_attr(con):
+    return con.execute("SELECT 1 FROM sqlite_master WHERE name='attr'").fetchone() is not None
+
+
+def build_sats(con, t0):
+    """Satellite attribution in the window: per satellite, the bursts it relayed (clearly
+    attributed ones), and where it is now; and how the bursts with a known beacon position fared."""
+    if not has_attr(con):
+        return None
+    states = dict(con.execute("SELECT state, COUNT(*) FROM attr WHERE t>=? GROUP BY state", (t0,)).fetchall())
+    per = {}
+    for sat, band, bid, burst, gen, t, el in con.execute(
+            "SELECT c.sat, a.band, a.bid, a.burst, a.gen, a.t, c.el FROM attr a JOIN copies c ON c.gen=a.gen AND c.burst=a.burst "
+            "WHERE a.t>=? AND a.state='clear' AND c.sat IS NOT NULL", (t0,)):
+        p = per.setdefault(sat, {"sat": sat, "band": band, "bursts": 0, "beacons": set(), "els": [], "last": 0})
+        p["bursts"] += 1
+        p["beacons"].add(bid)
+        p["els"].append(el)
+        p["last"] = max(p["last"], t)
+    now = {r[0]: r for r in con.execute("SELECT sat, name, constellation, t, lat, lon, alt, el, az FROM sat_now")}
+    out = []
+    for sat in set(per) | set(now):
+        p = per.get(sat, {"sat": sat, "band": None, "bursts": 0, "beacons": set(), "els": [], "last": None})
+        n = now.get(sat)
+        els = sorted(p["els"])
+        out.append({"sat": sat, "name": n[1] if n else sat,
+                    "constellation": n[2] if n else {"galileo": "Galileo", "glonass": "GLONASS"}.get(p["band"], ""),
+                    "bursts": p["bursts"], "beacons": len(p["beacons"]), "el_med": els[len(els) // 2] if els else None,
+                    "last": p["last"], "now": {"t": n[3], "lat": n[4], "lon": n[5], "alt": n[6], "el": n[7], "az": n[8]} if n else None})
+    out.sort(key=lambda x: (-x["bursts"], x["sat"]))
+    # The beacon frequency the copies imply, from second-generation bursts (406.05 MHz nominal,
+    # and tightly held): its offset is the receiver's own frequency reference error.
+    offs = sorted(r[0] - 406.05e6 for r in con.execute(
+        "SELECT f0 FROM attr WHERE gen=2 AND state='clear' AND n>1 AND t>=?", (t0,)))
+    return {"states": states, "sats": out, "ref_hz": offs[len(offs) // 2] if offs else None, "ref_n": len(offs)}
+
+
+def burst_sats(con, gen, ids):
+    """{burst id: (state, "SAT1,SAT2")} for bursts that were looked at."""
+    if not ids or not has_attr(con):
+        return {}
+    out = {}
+    ids = list(ids)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        out.update({r[0]: (r[1], r[2]) for r in con.execute(
+            f"SELECT burst, state, sats FROM attr WHERE gen=? AND burst IN ({','.join('?' * len(chunk))})", (gen, *chunk))})
+    return out
 
 
 def build_overview(db, hours):
@@ -145,7 +195,7 @@ def build_overview(db, hours):
                        "countries": len(countries - {None}), "types": dict(bt.most_common())},
             "beacons": beacons, "sgb": sgb, "activity": activity, "relays": dict(sorted(relays.items())),
             "bands": dict(bands), "rx": rx, "last_rollup": float(meta.get("last_run", 0)),
-            "dec406": meta.get("dec406") == "yes",
+            "dec406": meta.get("dec406") == "yes", "satellites": build_sats(con, t0),
         }
     finally:
         con.close()
@@ -156,18 +206,21 @@ def build_beacon(db, bid):
     try:
         if "-" in (bid or ""):
             rows = con.execute("SELECT b.t, b.band, b.hex, b.ebn0, b.relays, b.alone=0, b.f_hz, b.ebn0s, b.how, "
-                               "f.lat, f.lon FROM sgb_bursts b LEFT JOIN frames f ON f.hex=b.hex "
+                               "f.lat, f.lon, b.id FROM sgb_bursts b LEFT JOIN frames f ON f.hex=b.hex "
                                "WHERE b.bid=? ORDER BY b.t DESC LIMIT 1000", (bid,)).fetchall()
+            sats = burst_sats(con, 2, [r[11] for r in rows])
             bursts = [{"t": r[0], "band": r[1], "hex": r[2], "ebn0": r[3], "relays": r[4], "combined_only": r[5],
-                       "f_hz": r[6], "detail": f"{r[8]} · relays {r[7]} dB", "lat": r[9], "lon": r[10]} for r in rows]
+                       "f_hz": r[6], "detail": f"{r[8]} · relays {r[7]} dB", "lat": r[9], "lon": r[10],
+                       "attr": sats.get(r[11])} for r in rows]
         else:
             rows = con.execute("SELECT b.t, b.band, b.hex, b.ebn0, b.relays, b.combined_only, b.f_hz, b.cn0, b.single, "
-                               "f.lat, f.lon, COALESCE(b.via, '') FROM fgb_bursts b LEFT JOIN frames f ON f.hex=b.hex "
+                               "f.lat, f.lon, COALESCE(b.via, ''), b.id FROM fgb_bursts b LEFT JOIN frames f ON f.hex=b.hex "
                                "WHERE b.bid=? ORDER BY b.t DESC LIMIT 1000", (bid,)).fetchall()
+            sats = burst_sats(con, 1, [r[12] for r in rows])
             bursts = [{"t": r[0], "band": r[1], "hex": r[2], "ebn0": r[3], "relays": r[4], "combined_only": r[5],
                        "f_hz": r[6], "detail": {"match": "matched to this beacon's frame", "repeat": "decoded with its repeats"}.get(
                            r[11], ("strict" if r[8] else "weak") + (f" · C/N0 {r[7]:.1f}" if r[7] else "")),
-                       "lat": r[9], "lon": r[10]} for r in rows]
+                       "lat": r[9], "lon": r[10], "attr": sats.get(r[12])} for r in rows]
         if not bursts:
             return {"id": bid, "bursts": []}
         # The latest frame's fields; a beacon that updates its position (or an orbitography
@@ -198,6 +251,18 @@ def build_map(db, hours, where):
                     tr[-1][0] = p[0]          # same place again: keep the latest time
                 else:
                     tr.append(p)
+        # Each beacon's latest clearly attributed burst: the satellites (sub-satellite points at the
+        # time) that relayed it, for the globe's beacon -> satellite -> station links.
+        relay = {}
+        if has_attr(con):
+            latest = {}
+            for gen, bid, burst, t in con.execute("SELECT gen, bid, burst, t FROM attr WHERE state='clear' AND t>=?", (t0,)):
+                if bid not in latest or t > latest[bid][2]:
+                    latest[bid] = (gen, burst, t)
+            for bid, (gen, burst, t) in latest.items():
+                relay[bid] = {"t": t, "sats": [{"sat": r[0], "lat": r[1], "lon": r[2], "alt": r[3], "el": r[4]} for r in con.execute(
+                    "SELECT sat, slat, slon, salt, el FROM copies WHERE gen=? AND burst=? AND sat IS NOT NULL ORDER BY k", (gen, burst))]}
+        sats = build_sats(con, t0)
     finally:
         con.close()
     items = []
@@ -211,10 +276,10 @@ def build_map(db, hours, where):
                           "fields": b.get("fields", []), "hex": b.get("hex"),
                           "tac": b.get("tac"), "serial": b.get("serial"),
                           "lat": tr[-1][1] if tr else None, "lon": tr[-1][2] if tr else None,
-                          "track": tr[-500:]})
+                          "track": tr[-500:], "relay": relay.get(b["id"])})
     items.sort(key=lambda b: -b["last"])
     return {"generated": ov["generated"], "newest": ov["newest"], "hours": ov["hours"], "items": items,
-            "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"]}
+            "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"], "satellites": sats}
 
 
 STATIC_TYPES = {".js": "text/javascript", ".json": "application/json", ".jpg": "image/jpeg", ".css": "text/css",

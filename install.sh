@@ -153,13 +153,15 @@ if [ "$DEPS" -eq 1 ]; then
   info "Packages"
   if have apt-get; then
     PKGS=(build-essential cmake pkg-config git python3 curl usbutils iproute2 gzip
-          libfftw3-dev libusb-1.0-0-dev libairspy-dev libhackrf-dev)
+          libfftw3-dev libusb-1.0-0-dev libairspy-dev libhackrf-dev
+          python3-sgp4)   # the observatory's satellite attribution
     as_root apt-get install -y -q --no-install-recommends "${PKGS[@]}" \
       || die "could not install the build tools — see apt's message above"
-    ok "build tools, FFTW, Airspy and HackRF support installed"
+    ok "build tools, FFTW, Airspy and HackRF support, SGP4 installed"
   else
     warn "not a Debian/Ubuntu system — install by hand: cmake, a C compiler, pkg-config, FFTW3"
-    warn "(single precision), libairspy, libhackrf, python3, then re-run with --no-deps"
+    warn "(single precision), libairspy, libhackrf, python3 (and its sgp4 module, for the observatory's"
+    warn "satellite attribution), then re-run with --no-deps"
   fi
 fi
 
@@ -288,7 +290,7 @@ else
   [ -n "$CUR_KEEP" ] && { RX_ARGS+=" $CUR_KEEP"; ok "kept as they were (edit $CONF to change them): $CUR_KEEP"; }
   RX_ARGS="$(echo "$RX_ARGS" | sed 's/^ *//; s/  */ /g; s/ *$//')"
   STATION="$(ask "Station name for the dashboard" "$STATION")"
-  STATION_POS="$(ask "Station position for the globe, LAT,LON in degrees (none for none)" "${STATION_POS:-none}")"
+  STATION_POS="$(ask "Station position, LAT,LON in degrees, to ~1 km: the globe and satellite attribution use it (none for none)" "${STATION_POS:-none}")"
   [ "$STATION_POS" = none ] && STATION_POS=""
   KEEP_DAYS="$(ask "Days of raw archive to keep (0 = keep everything; the database keeps every burst)" "$KEEP_DAYS")"
   # dec406's hex decoder gives the observatory each frame's fields and position.
@@ -365,7 +367,7 @@ info "Installing program files to $PREFIX"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/bin" "$STAGE/observatory"
 cp "$BIN" "$STAGE/bin/"
-cp "$REPO_ROOT"/observatory/{rollup.py,server.py,page.html,globe.html} "$STAGE/observatory/"
+cp "$REPO_ROOT"/observatory/{rollup.py,satattr.py,server.py,page.html,globe.html} "$STAGE/observatory/"
 cp -r "$REPO_ROOT"/observatory/static "$STAGE/observatory/"   # the globe's script and vendored assets
 cat > "$STAGE/bin/meosar-tidy" <<'EOF'
 #!/bin/sh
@@ -497,7 +499,9 @@ Description=MEOSAR Observatory: fold the archive into the database
 Type=oneshot
 User=$RUN_USER
 Nice=10
-ExecStart=$PY $PREFIX/observatory/rollup.py --archive $ARCHIVE_DIR --db $DB_PATH $DEC_ARG
+EnvironmentFile=$CONF
+# --where: the station's position, for satellite attribution (TLEs fetched daily into $DATA_DIR/tle)
+ExecStart=$PY $PREFIX/observatory/rollup.py --archive $ARCHIVE_DIR --db $DB_PATH $DEC_ARG --where "\${STATION_POS}"
 EOF
 root_write "$ROLLUP_TIMER" 0644 <<EOF
 $MARKER — don't edit; change $CONF instead.

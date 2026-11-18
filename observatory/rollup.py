@@ -23,9 +23,14 @@ Follows inmarsat-rx's and vdl2-observatory's rollup.py.
   * Frame fields (protocol, country, identification, position) come from dec406's hex decoder
     when it is installed (--dec406), once per distinct frame; without it, the basics are
     decoded here.
+  * Satellite attribution (satattr.py): every relayed copy of a burst is kept, and bursts of
+    beacons with a position are attributed to the satellites that relayed them, given the
+    station's position (--where) and python3-sgp4. TLEs are fetched daily into --tle-dir.
+  * Schema 2 added the copies; a database from schema 1 is rebuilt from its source files (all
+    still present) on the first run, keeping the decoded frames.
 
 Usage:
-    rollup.py [--archive DIR] [--db PATH] [--dec406 PATH] [-v] [FILE ...]
+    rollup.py [--archive DIR] [--db PATH] [--dec406 PATH] [--where LAT,LON] [--tle-dir DIR] [-v] [FILE ...]
 
 FILE arguments are ingested as well as the archive: results from recordings, say.
 """
@@ -42,11 +47,17 @@ import sys
 import time
 from datetime import datetime
 
-SCHEMA_VERSION = 1
+import satattr
+
+SCHEMA_VERSION = 2
 GROUP_S = 1.5
 
 
 def init_db(con):
+    """Creates the tables; returns the schema version the database had (0: new)."""
+    had = 0
+    if con.execute("SELECT 1 FROM sqlite_master WHERE name='meta'").fetchone():
+        had = int((con.execute("SELECT value FROM meta WHERE key='schema'").fetchone() or ["0"])[0])
     con.executescript(
         """
         PRAGMA journal_mode=WAL;
@@ -94,9 +105,29 @@ def init_db(con):
     # Added after schema 1: how a burst was decoded when not alone ('', 'match', 'repeat').
     if "via" not in [c[1] for c in con.execute("PRAGMA table_info(fgb_bursts)")]:
         con.execute("ALTER TABLE fgb_bursts ADD COLUMN via TEXT DEFAULT ''")
+    satattr.init_tables(con)
     con.execute("INSERT INTO meta(key,value) VALUES('schema',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
     con.commit()
+    return had
+
+
+def rebuild(con):
+    """Schema 1 -> 2: empty the burst tables and read every source file again from the start, so
+    the bursts get their copies. Returns the files to read, or None (and changes nothing) if a
+    source file is gone, since its bursts could not be read back."""
+    files = [r[0] for r in con.execute("SELECT file FROM ingest_state")]
+    gone = [f for f in files if not os.path.isfile(f)]
+    if gone:
+        print(f"rollup: not rebuilding for satellite attribution: {len(gone)} source file(s) gone "
+              f"({gone[0]}...); older bursts stay without their copies", file=sys.stderr)
+        return None
+    for tb in ("fgb_bursts", "sgb_bursts", "cand_hourly", "rx_events", "copies", "attr"):
+        con.execute(f"DELETE FROM {tb}")
+    con.execute("UPDATE ingest_state SET offset=0, size=0")
+    con.commit()
+    print(f"rollup: rebuilding from {len(files)} source file(s) to keep each burst's relayed copies")
+    return files
 
 
 def epoch(utc):
@@ -242,9 +273,17 @@ class Ingest:
         hexs = r.get("hex")
         if not acc or not hexs:
             return
-        self.burst(t, r.get("band"), hexs, None if combined else r.get("ebn0"), r.get("ebn0"),
-                   "" if combined else str(round(r.get("f_hz", 0) / 100)), r.get("combined", 0), int(combined),
-                   1 if acc == "single" else 0, int(bool(r.get("selftest_sync"))), r.get("f_hz"), r.get("cn0"), "")
+        bid_id = self.burst(t, r.get("band"), hexs, None if combined else r.get("ebn0"), r.get("ebn0"),
+                            "" if combined else str(round(r.get("f_hz", 0) / 100)), r.get("combined", 0), int(combined),
+                            1 if acc == "single" else 0, int(bool(r.get("selftest_sync"))), r.get("f_hz"), r.get("cn0"), "")
+        f, tc = r.get("f_hz"), r.get("t_cw")
+        if not combined and f is not None and tc is not None:
+            # One relayed copy: kept for satellite attribution unless another relay's copy at the
+            # same carrier is in already (the same copy decoded twice).
+            have = self.con.execute("SELECT k, f_hz FROM copies WHERE gen=1 AND burst=?", (bid_id,)).fetchall()
+            if all(abs(f - f2) > 20 for _, f2 in have):
+                self.con.execute("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0) VALUES(1,?,?,?,?,?)",
+                                 (bid_id, max([k for k, _ in have], default=-1) + 1, tc, f, r.get("ebn0")))
 
     def repeat(self, r, t):
         """Repeat combining: a weak burst attributed to a known beacon (fgb_match), or a frame decoded
@@ -277,11 +316,12 @@ class Ingest:
             self.con.execute("UPDATE fgb_bursts SET fbins=?, comb=?, relays=?, ebn0=?, combined_only=?, single=? "
                              "WHERE id=?", (",".join(sorted(bins)), c, max(len(bins), c, 1),
                                             e if e > -99 else None, co and combined, max(s0, single), bid_id))
+            return bid_id
         else:
-            self.con.execute("INSERT INTO fgb_bursts(t,band,bid,hex,ebn0,relays,fbins,comb,combined_only,single,"
+            return self.con.execute("INSERT INTO fgb_bursts(t,band,bid,hex,ebn0,relays,fbins,comb,combined_only,single,"
                              "selftest,f_hz,cn0,via) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                              (t, band, bid, hexs, ebn0 if ebn0 is not None else ebn0_any,
-                              max(1 if fb else 0, comb, 1), fb, comb, combined, single, selftest, f_hz, cn0, via))
+                              max(1 if fb else 0, comb, 1), fb, comb, combined, single, selftest, f_hz, cn0, via)).lastrowid
 
     def sgb(self, r, t):
         acc = r.get("accept", "single" if r.get("ok") else "")   # Python scan: ok means accepted
@@ -295,13 +335,17 @@ class Ingest:
         ensure_frame(self.con, hexs, 2, self.tool, self.seen)
         rel = r.get("relays") or []
         eb = [x.get("ebn0") for x in rel if x.get("ebn0") is not None]
-        self.con.execute(
+        cur = self.con.execute(
             "INSERT OR IGNORE INTO sgb_bursts(t,tq,band,bid,hex,tac,serial,country,test,relays,ebn0,ebn0s,how,"
             "alone,single,f_hz) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (t, round(t * 10), r.get("band"), f"{s['country']}-{s['tac']}-{s['serial']}", hexs, s["tac"],
              s["serial"], s["country"], s["test"], len(rel) or 1, max(eb) if eb else None,
              " ".join(f"{e:.1f}" for e in eb), r.get("how", ""), int(any(x.get("alone") for x in rel)),
              int(acc == "single" and "6 errors" not in r.get("how", "")), r.get("f_hz")))
+        if cur.rowcount == 1:   # each relay's copy, for satellite attribution
+            self.con.executemany("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0) VALUES(2,?,?,?,?,?)",
+                                 [(cur.lastrowid, k, x["dt_ms"] / 1000, x["f_hz"], x.get("ebn0"))
+                                  for k, x in enumerate(rel) if x.get("f_hz") is not None and x.get("dt_ms") is not None])
 
     def flush(self):
         self.con.executemany(
@@ -349,6 +393,8 @@ def main():
     ap.add_argument("--db", default="observatory.db")
     ap.add_argument("--dec406", default=os.path.expanduser("~/dec406/build/dec406_hex"),
                     help="dec406's hex decoder, for frame fields and positions ('' = none)")
+    ap.add_argument("--where", default="", help="station position LAT,LON, for satellite attribution ('' = none)")
+    ap.add_argument("--tle-dir", default="", help="TLE snapshots (default: tle/ beside the database)")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("files", nargs="*", help="more JSONL files to ingest (recordings' results)")
     a = ap.parse_args()
@@ -368,9 +414,19 @@ def main():
     lock = open(a.db + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)   # one rollup at a time, or two would add the same lines
     con = sqlite3.connect(a.db, timeout=30)
-    init_db(con)
+    had = init_db(con)
+    if 0 < had < 2:
+        known = rebuild(con)
+        extra += [f for f in known or [] if f not in extra and os.path.dirname(f) != os.path.abspath(a.archive)]
+        files = sorted(glob.glob(os.path.join(a.archive, "meosar-*.jsonl"))) + extra
     ing = Ingest(con, tool)
     total = sum(ingest_file(con, p, ing, a.verbose) for p in files)
+    try:
+        where = tuple(float(x) for x in a.where.split(",")) if a.where else None
+    except ValueError:
+        print(f"rollup: --where {a.where!r} is not LAT,LON: no satellite attribution", file=sys.stderr)
+        where = None
+    sat = satattr.run(con, where, a.tle_dir or os.path.join(os.path.dirname(os.path.abspath(a.db)), "tle"), a.verbose)
     con.execute("INSERT INTO meta(key,value) VALUES('last_run',?) ON CONFLICT(key) DO UPDATE SET "
                 "value=excluded.value", (str(int(time.time())),))
     con.execute("INSERT INTO meta(key,value) VALUES('dec406',?) ON CONFLICT(key) DO UPDATE SET "
@@ -378,6 +434,8 @@ def main():
     con.commit()
     con.close()
     extra = [f"{ing.bad} malformed"] * bool(ing.bad) + [f"{ing.skipped} without a UTC time"] * bool(ing.skipped)
+    if sat:
+        extra.append(f"satellites: {sat}")
     print(f"rollup: {total} new records from {len(files)} file(s)" + (", " + ", ".join(extra) if extra else ""))
     return 0
 

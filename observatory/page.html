@@ -76,6 +76,7 @@
       <div class="panel"><h2>Satellites per burst <span class="hint">first generation</span></h2><div id="relays"></div></div>
     </div>
   </div>
+  <div class="panel" id="satpanel"><h2>Satellites <span class="hint" id="sathint"></span></h2><div id="sats"></div></div>
   <div class="panel" id="detail" style="display:none"></div>
   <div class="panel">
     <h2><span>First-generation beacons <span class="hint" id="bhint"></span></span>
@@ -161,6 +162,29 @@ function relays() {
     `<tr><td>${k}${k == 8 ? "+" : ""}</td><td><span class="bar" style="width:${Math.max(2, v / max * 160)}px"></span> <span class="dim">${v} · ${(100 * v / tot).toFixed(0)}%</span></td></tr>`).join("") + `</table>` : `<p class="dim">No bursts in this window.</p>`;
 }
 
+// Satellite attribution: which satellite relayed each copy (bursts of beacons with a position).
+function sats() {
+  const A = S.satellites;
+  if (!A) { $("sathint").textContent = ""; $("sats").innerHTML = `<p class="dim">No satellite attribution: the rollup needs python3-sgp4 and the station's position (STATION_POS).</p>`; return; }
+  const st = A.states, clear = st.clear || 0, all = Object.values(st).reduce((a, b) => a + b, 0);
+  const ref = A.ref_hz == null ? "" : ` · receiver reference ${A.ref_hz >= 0 ? "+" : "−"}${Math.abs(A.ref_hz).toFixed(0)} Hz at 406 MHz (${(Math.abs(A.ref_hz) / 406.05).toFixed(2)} ppm${A.ref_hz < 0 ? " low" : " high"}, from ${A.ref_n} SGB bursts)`;
+  $("sathint").textContent = `${clear} of ${all} bursts from beacons with a position attributed` +
+    (st.ambiguous ? ` · ${st.ambiguous} ambiguous` : "") + (st.noref ? ` · ${st.noref} single copies without a reference` : "") + ref;
+  const L = A.sats.filter(x => x.bursts || (x.now && x.now.el >= 5));
+  if (!L.length) { $("sats").innerHTML = `<p class="dim">No attributed bursts in this window.</p>`; return; }
+  const max = Math.max(1, ...L.map(x => x.bursts));
+  const alias = x => { const m = /\(([^)]+)\)/.exec(x.name || ""); return m ? ` <span class="dim">${esc(m[1])}</span>` : ""; };
+  const now = x => !x.now ? "—" : x.now.el >= 5 ? `<span class="dot ok"></span>${x.now.el.toFixed(0)}° el · ${x.now.az}° az` :
+    x.now.el >= 0 ? `<span class="dot warn"></span>${x.now.el.toFixed(0)}° el` : `<span class="dim">below the horizon</span>`;
+  $("sats").innerHTML = `<table><tr><th>Satellite</th><th>Constellation</th><th>Now</th><th>Copies relayed</th><th class="r">Beacons</th><th class="r">Median elevation</th><th>Last relayed</th></tr>` +
+    L.map(x => `<tr><td class="mono">${esc(x.sat)}${alias(x)}</td><td>${esc(x.constellation)}</td><td>${now(x)}</td>` +
+      `<td><span class="bar" style="width:${Math.max(2, x.bursts / max * 140)}px"></span> <span class="dim">${x.bursts}</span></td>` +
+      `<td class="r">${x.beacons}</td><td class="r">${x.el_med == null ? "—" : x.el_med.toFixed(0) + "°"}</td><td class="dim">${ts(x.last)}</td></tr>`).join("") + "</table>";
+}
+const satCell = a => !a ? `<span class="dim">—</span>` : a[0] === "clear" ? esc(a[1].replaceAll(",", ", ")) :
+  a[0] === "ambiguous" ? `<span class="dim" title="another assignment fits nearly as well">${esc(a[1].replaceAll(",", ", "))}?</span>` :
+  `<span class="dim" title="${esc({nofit: "no assignment fits", noref: "one copy, and no frequency reference for this beacon", nosat: "too few satellites in view"}[a[0]] || a[0])}">${esc(a[0])}</span>`;
+
 function typeChips() {
   const ty = S.totals.types;
   $("types").innerHTML = Object.entries(ty).map(([k, v]) => `<span class="chip ${typeOn.has(k) ? "on" : ""}" data-t="${esc(k)}">${esc(k)} ${v}</span>`).join("");
@@ -204,11 +228,11 @@ async function detail(id) {
   let h = `<h2><span>Beacon <span class="mono">${esc(id)}</span> <span class="hint">${d.bursts.length}${d.bursts.length >= 1000 ? "+" : ""} bursts, all time · ${d.frames || 0} distinct frame${d.frames === 1 ? "" : "s"}</span></span><span class="chip" id="close">close</span></h2>`;
   h += `<div class="dim">Latest frame <span class="mono">${esc(L.hex || "")}</span></div>` +
     (L.fields && L.fields.length ? `<div class="mono fields">${L.fields.map(esc).join("\n")}</div>` : `<div>${esc(L.protocol || "")}</div>`) +
-    (L.lat != null ? `<div style="margin:4px 0 8px">${pos(L)}</div>` : "");
+    (L.lat != null ? `<div style="margin:4px 0 8px">${pos(L)} · <a href="globe?beacon=${encodeURIComponent(id)}">on the globe, with the satellites that relayed it</a></div>` : "");
   const anyPos = d.bursts.some(b => b.lat != null);
-  h += `<table style="margin-top:8px"><tr><th>Time (UTC)</th><th>Band</th><th class="r">Carrier</th><th class="r">Eb/N0</th><th class="r">Sats</th>${anyPos ? "<th>Position</th>" : ""}<th>Decode</th></tr>` +
+  h += `<table style="margin-top:8px"><tr><th>Time (UTC)</th><th>Band</th><th class="r">Carrier</th><th class="r">Eb/N0</th><th class="r">Sats</th>${anyPos ? "<th>Relayed by</th><th>Position</th>" : ""}<th>Decode</th></tr>` +
     d.bursts.slice(0, 300).map(b => `<tr><td class="dim">${ts(b.t)}</td><td>${esc(b.band)}</td><td class="r mono">${b.f_hz ? (b.f_hz / 1e6).toFixed(4) : ""}</td><td class="r">${f1(b.ebn0)}</td>` +
-      `<td class="r">${b.relays}</td>${anyPos ? `<td>${pos(b)}</td>` : ""}<td class="dim">${esc(b.detail)}${b.combined_only ? " · combined only" : ""}</td></tr>`).join("") + "</table>";
+      `<td class="r">${b.relays}</td>${anyPos ? `<td class="mono">${satCell(b.attr)}</td><td>${pos(b)}</td>` : ""}<td class="dim">${esc(b.detail)}${b.combined_only ? " · combined only" : ""}</td></tr>`).join("") + "</table>";
   $("detail").innerHTML = h;
   $("detail").style.display = "";
   $("close").onclick = () => detail(id);
@@ -220,7 +244,7 @@ async function refresh() {
     const h = $("hours").value;
     S = await (await fetch("api/overview?hours=" + h, {cache: "no-store"})).json();
     if (S.empty) { $("status").textContent = "no data yet — waiting for the receiver and the rollup"; return; }
-    tiles(); activity(); rx(); relays(); typeChips(); beacons(); sgb();
+    tiles(); activity(); rx(); relays(); sats(); typeChips(); beacons(); sgb();
     $("status").textContent = `newest ${hm(S.newest)} UTC`;
   } catch (e) {
     $("status").textContent = "cannot reach the station";

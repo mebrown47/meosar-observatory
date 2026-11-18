@@ -53,10 +53,26 @@ of both generations with their fields and positions, bursts over time, satellite
 receiver's status, and each beacon's burst history. A beacon is shown once it is confirmed: a
 strict decode, or bursts from two separate transmissions.
 
+Satellite attribution (`observatory/satattr.py`): for beacons whose frames carry a position, the
+rollup works out which satellite relayed each copy of a burst. Under the right assignment of copies
+to satellites (orbits from CelesTrak's TLEs, propagated with SGP4), every copy implies the same
+beacon frequency and transmit time once each satellite's Doppler and path delay are removed. A
+burst heard through one satellite only is attributed by frequency, when the same beacon's frequency
+is known from a multi-copy burst within the hour. The dashboard lists the satellites (where each is
+now, copies relayed, beacons, the elevations they relay at) and the satellites of every burst, and
+shows the receiver's frequency reference error, which is the common offset of the implied beacon
+frequency (second-generation beacons hold 406.05 MHz tightly). This needs `python3-sgp4` and the
+station's position to ~1 km in `STATION_POS`; a wrong position shows as bursts that fit no
+assignment (`proto/stationfit.py` finds the position from the bursts themselves). TLEs are fetched
+once a day into `/var/lib/meosar-rx/tle/`, the only internet access the observatory makes; offline,
+attribution waits for TLEs at most 30 days from each burst.
+
 `/globe` lists the beacons on the left and maps their positions on a 3D globe on the right: colour
 by beacon type, first generation round and second generation diamond, tracks joining a beacon's
 positions (broken where the implied speed is impossible, as with test beacons that alternate a
 placeholder position), and the station itself when `STATION_POS` is set in `/etc/meosar-rx.conf`.
+With satellite attribution it also marks the SAR satellites in view now, and links a selected
+beacon to the satellites that relayed its latest burst and on to the station.
 The globe is rtl-sdr-workbench's renderer with its vendored assets in `observatory/static/`
 (three.js, MIT; NASA Black Marble, public domain; world-atlas coastlines, ISC), so it needs no
 internet.
