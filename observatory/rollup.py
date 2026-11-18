@@ -18,6 +18,8 @@ Follows inmarsat-rx's and vdl2-observatory's rollup.py.
   * A beacon is shown once it is confirmed: a strict decode, or bursts in two separate
     transmissions. For SGB, strict is a hard decode with at most 5 of BCH's 6 correctable errors:
     single Chase decodes and 6-error decodes are where noise gives false frames.
+  * Repeat combining (meosar-rx fgb_match / fgb_repeat records) adds bursts that never decoded
+    alone: each becomes a burst of its beacon, marked in `via`.
   * Frame fields (protocol, country, identification, position) come from dec406's hex decoder
     when it is installed (--dec406), once per distinct frame; without it, the basics are
     decoded here.
@@ -89,6 +91,9 @@ def init_db(con):
         CREATE INDEX IF NOT EXISTS ix_rx_t ON rx_events(t);
         """
     )
+    # Added after schema 1: how a burst was decoded when not alone ('', 'match', 'repeat').
+    if "via" not in [c[1] for c in con.execute("PRAGMA table_info(fgb_bursts)")]:
+        con.execute("ALTER TABLE fgb_bursts ADD COLUMN via TEXT DEFAULT ''")
     con.execute("INSERT INTO meta(key,value) VALUES('schema',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
     con.commit()
@@ -223,6 +228,8 @@ class Ingest:
             self.con.execute("INSERT INTO rx_events VALUES(?,?,?,?,?,?,?,?)",
                              (t, kind, r.get("src"), r.get("cand"), r.get("acc"), r.get("sgb"),
                               r.get("dropped_s"), r.get("cpu")))
+        elif kind in ("fgb_match", "fgb_repeat"):
+            self.repeat(r, t)
         elif kind == "sgb" or ("relays" in r and "t_cw" not in r):   # (the Python scan's have no kind)
             self.sgb(r, t)
         elif "t_cw" in r:
@@ -235,12 +242,30 @@ class Ingest:
         hexs = r.get("hex")
         if not acc or not hexs:
             return
+        self.burst(t, r.get("band"), hexs, None if combined else r.get("ebn0"), r.get("ebn0"),
+                   "" if combined else str(round(r.get("f_hz", 0) / 100)), r.get("combined", 0), int(combined),
+                   1 if acc == "single" else 0, int(bool(r.get("selftest_sync"))), r.get("f_hz"), r.get("cn0"), "")
+
+    def repeat(self, r, t):
+        """Repeat combining: a weak burst attributed to a known beacon (fgb_match), or a frame decoded
+        from several weak bursts (fgb_repeat), each member a burst of that beacon."""
+        hexs = r.get("hex")
+        if not hexs:
+            return
+        if r.get("kind") == "fgb_match":
+            members, via = [r], "match"
+        else:
+            members, via = r.get("members") or [], "repeat"
+        for m in members:
+            tm = epoch(m.get("utc")) or t
+            self.burst(tm, m.get("band"), hexs, m.get("ebn0"), m.get("ebn0"), str(round(m.get("f_hz", 0) / 100)),
+                       0, 1, 0, 0, m.get("f_hz"), None, via)
+
+    def burst(self, t, band, hexs, ebn0, ebn0_any, fb, comb, combined, single, selftest, f_hz, cn0, via):
+        """One copy of a burst: merged with the beacon's burst within GROUP_S, or a new burst row.
+        combined: this copy was not decoded alone (relay-combined, matched or repeat-decoded)."""
         bid = hexs[:15]
         ensure_frame(self.con, hexs, 1, self.tool, self.seen)
-        fb = "" if combined else str(round(r.get("f_hz", 0) / 100))
-        comb = r.get("combined", 0)
-        ebn0 = None if combined else r.get("ebn0")
-        single = 1 if acc == "single" else 0
         row = self.con.execute("SELECT id, fbins, comb, ebn0, combined_only, single FROM fgb_bursts "
                                "WHERE bid=? AND t BETWEEN ? AND ? ORDER BY ABS(t-?) LIMIT 1",
                                (bid, t - GROUP_S, t + GROUP_S, t)).fetchone()
@@ -251,13 +276,12 @@ class Ingest:
             e = max(x for x in (e0, ebn0, -99) if x is not None)
             self.con.execute("UPDATE fgb_bursts SET fbins=?, comb=?, relays=?, ebn0=?, combined_only=?, single=? "
                              "WHERE id=?", (",".join(sorted(bins)), c, max(len(bins), c, 1),
-                                            e if e > -99 else None, co and int(combined), max(s0, single), bid_id))
+                                            e if e > -99 else None, co and combined, max(s0, single), bid_id))
         else:
             self.con.execute("INSERT INTO fgb_bursts(t,band,bid,hex,ebn0,relays,fbins,comb,combined_only,single,"
-                             "selftest,f_hz,cn0) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                             (t, r.get("band"), bid, hexs, ebn0 if ebn0 is not None else r.get("ebn0"),
-                              max(1 if fb else 0, comb, 1), fb, comb, int(combined), single,
-                              int(bool(r.get("selftest_sync"))), r.get("f_hz"), r.get("cn0")))
+                             "selftest,f_hz,cn0,via) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                             (t, band, bid, hexs, ebn0 if ebn0 is not None else ebn0_any,
+                              max(1 if fb else 0, comb, 1), fb, comb, combined, single, selftest, f_hz, cn0, via))
 
     def sgb(self, r, t):
         acc = r.get("accept", "single" if r.get("ok") else "")   # Python scan: ok means accepted

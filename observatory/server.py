@@ -109,12 +109,15 @@ def build_overview(db, hours):
         activity = [[int(tstart + i * bin_s), *act.get(int(tstart + i * bin_s), [0, 0])] for i in range(nb)]
 
         relays = collections.Counter()
-        n_bursts = only_comb = 0
-        for rel, co, bid in con.execute("SELECT relays, combined_only, bid FROM fgb_bursts WHERE t>=?", (t0,)):
+        n_bursts = only_comb = by_repeat = 0
+        for rel, co, bid, via in con.execute("SELECT relays, combined_only, bid, COALESCE(via, '') FROM fgb_bursts WHERE t>=?", (t0,)):
             if bid in ok_ids:
                 relays[min(rel, 8)] += 1
                 n_bursts += 1
-                only_comb += co
+                if via:
+                    by_repeat += 1
+                else:
+                    only_comb += co
         cand = con.execute("SELECT band, gen, SUM(cand), SUM(acc) FROM cand_hourly WHERE hour>=? GROUP BY band, gen",
                            (int(t0) // 3600 * 3600,)).fetchall()
         bands = collections.defaultdict(lambda: {"fgb_cand": 0, "fgb_acc": 0, "sgb_cand": 0, "sgb_acc": 0})
@@ -137,7 +140,7 @@ def build_overview(db, hours):
         meta = dict(con.execute("SELECT key, value FROM meta").fetchall())
         return {
             "generated": time.time(), "newest": t1, "hours": hours, "bin_s": bin_s,
-            "totals": {"beacons": len(beacons), "bursts": n_bursts, "only_combined": only_comb,
+            "totals": {"beacons": len(beacons), "bursts": n_bursts, "only_combined": only_comb, "by_repeat": by_repeat,
                        "sgb_beacons": len(sgb), "sgb_bursts": sum(s["bursts"] for s in sgb),
                        "countries": len(countries - {None}), "types": dict(bt.most_common())},
             "beacons": beacons, "sgb": sgb, "activity": activity, "relays": dict(sorted(relays.items())),
@@ -159,10 +162,11 @@ def build_beacon(db, bid):
                        "f_hz": r[6], "detail": f"{r[8]} · relays {r[7]} dB", "lat": r[9], "lon": r[10]} for r in rows]
         else:
             rows = con.execute("SELECT b.t, b.band, b.hex, b.ebn0, b.relays, b.combined_only, b.f_hz, b.cn0, b.single, "
-                               "f.lat, f.lon FROM fgb_bursts b LEFT JOIN frames f ON f.hex=b.hex "
+                               "f.lat, f.lon, COALESCE(b.via, '') FROM fgb_bursts b LEFT JOIN frames f ON f.hex=b.hex "
                                "WHERE b.bid=? ORDER BY b.t DESC LIMIT 1000", (bid,)).fetchall()
             bursts = [{"t": r[0], "band": r[1], "hex": r[2], "ebn0": r[3], "relays": r[4], "combined_only": r[5],
-                       "f_hz": r[6], "detail": ("strict" if r[8] else "weak") + (f" · C/N0 {r[7]:.1f}" if r[7] else ""),
+                       "f_hz": r[6], "detail": {"match": "matched to this beacon's frame", "repeat": "decoded with its repeats"}.get(
+                           r[11], ("strict" if r[8] else "weak") + (f" · C/N0 {r[7]:.1f}" if r[7] else "")),
                        "lat": r[9], "lon": r[10]} for r in rows]
         if not bursts:
             return {"id": bid, "bursts": []}

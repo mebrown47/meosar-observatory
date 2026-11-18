@@ -111,7 +111,7 @@ function tiles() {
   const op = Object.entries(ty).filter(([k]) => !["orbitography", "test"].includes(k)).reduce((a, [, v]) => a + v, 0);
   const items = [
     ["Beacons", T.beacons, `${ty.orbitography || 0} orbitography · ${ty.test || 0} test · ${op} other`],
-    ["Bursts decoded", T.bursts, `${T.only_combined} only by combining relays`],
+    ["Bursts decoded", T.bursts, `${T.only_combined} only by combining relays · ${T.by_repeat || 0} by repeats`],
     ["SGB beacons", T.sgb_beacons, `${T.sgb_bursts} bursts`],
     ["Countries", T.countries, "of registration"],
   ];

@@ -15,6 +15,10 @@ receiver; `src/` is the C receiver, which so far implements the first-generation
 3. Chase-II soft decoding of BCH-1 and BCH-2.
 4. Relay combining: copies of one burst relayed by different satellites are summed before decoding.
 5. Acceptance: a strong single decode, or the same beacon in two different bursts.
+6. Repeat combining: bursts too weak to decode alone are matched to known beacons by correlating
+   their soft bits with each beacon's BCH-1 codeword, or summed with earlier weak bursts that
+   correlate with them and decoded together (`fgb_match` and `fgb_repeat` records). On the 30-minute
+   Phase 0 recording at 13:17 UTC this adds 40% more bursts and two beacons that never decoded alone.
 
 ## Build and run
 

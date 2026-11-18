@@ -18,7 +18,7 @@ pkg_check_modules(FFTW3F REQUIRED fftw3f)
 pkg_check_modules(LIBAIRSPY libairspy)
 pkg_check_modules(LIBHACKRF libhackrf)
 
-add_library(meosar STATIC src/dsp.c src/fgb.c src/fgb_demod.c src/detect.c src/mids.c src/sgb.c src/sgb_rx.c)
+add_library(meosar STATIC src/dsp.c src/fgb.c src/fgb_demod.c src/fgb_repeat.c src/detect.c src/mids.c src/sgb.c src/sgb_rx.c)
 target_include_directories(meosar PUBLIC src ${FFTW3F_INCLUDE_DIRS})
 target_link_directories(meosar PUBLIC ${FFTW3F_LIBRARY_DIRS})
 target_link_libraries(meosar PUBLIC ${FFTW3F_LIBRARIES} m Threads::Threads)
@@ -28,6 +28,8 @@ target_link_libraries(meosar-rx meosar Threads::Threads)
 
 add_executable(test_fgb tests/test_fgb.c)
 target_link_libraries(test_fgb meosar)
+add_executable(test_repeat tests/test_repeat.c)
+target_link_libraries(test_repeat meosar)
 add_executable(test_sgb tests/test_sgb.c)
 target_link_libraries(test_sgb meosar)
 

@@ -19,6 +19,7 @@
 #include "dsp.h"
 #include "fgb.h"
 #include "fgb_demod.h"
+#include "fgb_repeat.h"
 #include "input.h"
 #include "out.h"
 #include "sgb_rx.h"
@@ -52,6 +53,7 @@ static void usage(void) {
 	        "  --bands LIST     galileo,glonass (default), quiet = noise-only test band\n"
 	        "  --thr DB         detector threshold (13)    --L N  Chase order (10, 0 = hard)\n"
 	        "  --no-combine     no relay combining         --no-llr  leave soft bits out of records\n"
+	        "  --no-repeat      no repeat combining        --repeat-window S  how long weak bursts wait (1200)\n"
 	        "  --no-sgb         FGB only                   --sgb-threads N (4)  --sgb-span HZ (8000)\n"
 	        "  --sgb-thr Z (19) acquisition threshold      --sgb-prez Z (7) preamble threshold\n"
 	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n"
@@ -131,6 +133,35 @@ static void emit(const fgb_rec_t *r, const fgb_rec_t *all, double t0_ms, int wit
 		for (int i = 0; i < FGB_BITS; i++) jb_printf(&b, "%s%.1f", i ? ", " : "", r->llr[i]);
 		jb_raw(&b, "]");
 	}
+	jb_raw(&b, "}");
+	out_emit(b.s);
+	jb_free(&b);
+}
+
+// Repeat combining results: a weak burst attributed to a known beacon (fgb_match), or a frame
+// decoded from several weak bursts of one beacon (fgb_repeat, one entry per member burst).
+static void emit_rep(const fgb_rep_t *o, double t0_ms) {
+	jbuf_t b = {0};
+	char hex[40] = "";
+	fgb_hex(o->frame.bits, o->frame.nbits, hex);
+	const fgb_rep_member_t *last = &o->mem[o->nmem - 1];
+	jb_printf(&b, "{\"kind\": \"%s\", \"band\": \"%s\", \"t_cw\": %.6f, \"f_hz\": %.1f, \"ebn0\": %.2f",
+	          o->kind == 1 ? "fgb_match" : "fgb_repeat", last->band, last->t_cw, last->f_hz, last->ebn0);
+	jb_printf(&b, ", \"hex\": \"%s\", \"long\": %s", hex, o->frame.long_frame ? "true" : "false");
+	if (o->kind == 1) {
+		jb_printf(&b, ", \"z\": %.1f, \"z2\": %.1f", o->z, o->z2);
+	} else {
+		jb_printf(&b, ", \"flips\": [%d, %d], \"bursts\": %d, \"members\": [", o->frame.bch1_flips, o->frame.bch2_flips, o->bursts);
+		for (int k = 0; k < o->nmem; k++) {
+			const fgb_rep_member_t *m = &o->mem[k];
+			jb_printf(&b, "%s{\"band\": \"%s\", \"t_cw\": %.6f, \"f_hz\": %.1f, \"ebn0\": %.2f, \"z\": %.1f", k ? ", " : "",
+			          m->band, m->t_cw, m->f_hz, m->ebn0, m->z);
+			jb_utc(&b, t0_ms, m->t_cw);
+			jb_raw(&b, "}");
+		}
+		jb_raw(&b, "]");
+	}
+	jb_utc(&b, t0_ms, last->t_cw);
 	jb_raw(&b, "}");
 	out_emit(b.s);
 	jb_free(&b);
@@ -221,11 +252,12 @@ int main(int argc, char **argv) {
 	const char *inspec = NULL, *fmt = NULL, *gain = NULL, *bands_s = "galileo,glonass";
 	double center = 1544.5e6, rate = 2.5e6, start = 0, dur = -1, thr = 13;
 	int L = 10, combine = 1, bias = 0, quiet = 0, with_llr = 1, do_sgb = 1, sgb_threads = 4;
-	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7, stats_s = 0;
+	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7, stats_s = 0, repeat_win = 1200;
+	int do_repeat = 1;
 	static struct option lo[] = {
 		{"start", 1, 0, 1}, {"dur", 1, 0, 2}, {"bands", 1, 0, 3}, {"thr", 1, 0, 4}, {"L", 1, 0, 5},
 		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"no-sgb", 0, 0, 8}, {"sgb-threads", 1, 0, 9},
-		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"no-repeat", 0, 0, 15}, {"repeat-window", 1, 0, 16}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
 	int o;
 	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qh", lo, NULL)) != -1) {
 		switch (o) {
@@ -251,6 +283,8 @@ int main(int argc, char **argv) {
 		case 12: sgb_prez = atof(optarg); break;
 		case 13: if (out_set_archive(optarg)) return 1; break;
 		case 14: stats_s = atof(optarg); break;
+		case 15: do_repeat = 0; break;
+		case 16: repeat_win = atof(optarg); break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
@@ -291,6 +325,9 @@ int main(int argc, char **argv) {
 	        in->name, fs, fc / 1e6, nb, thr, L, combine ? ", relay combining" : "", do_sgb ? ", SGB" : "");
 	if (stats_s > 0) emit_stat("start", in->start_ms, start, in->name, 0, 0, 0, 0, fs, 0);
 	double next_stat = start + fmin(60, stats_s);   // the first after a minute, so a fresh start shows soon
+	fgb_repeat_t *rpt = do_repeat ? fgb_repeat_new(repeat_win, L) : NULL;
+	fgb_rep_t *reps = malloc(sizeof(fgb_rep_t) * 256);
+	long long n_rep = 0;
 	sgb_acq_t *acq = do_sgb ? sgb_acq_new(f1, sgb_span, sgb_threads) : NULL;
 	sgb_rec_t *srecs = malloc(sizeof(sgb_rec_t) * 256);
 	long long n_sgb = 0;
@@ -361,6 +398,11 @@ int main(int argc, char **argv) {
 				emit(&recs[k], recs + first, in->start_ms, with_llr);
 				n_acc += recs[k].accept > 0;
 			}
+			if (rpt) {
+				int nr = fgb_repeat_block(rpt, recs + first, nrec - first, reps, 256);
+				for (int k = 0; k < nr; k++) emit_rep(&reps[k], in->start_ms);
+				n_rep += nr;
+			}
 			if (acq) {
 				int ns = sgb_process_block(acq, loc[bi], len[bi], f1, b->mid, t_y0, t_block, t_stop, sgb_thr, sgb_prez, srecs, 256);
 				for (int k = 0; k < ns; k++) {
@@ -397,8 +439,8 @@ int main(int argc, char **argv) {
 			emit_stat("stat", in->start_ms, t_block, NULL, n_cand, n_acc, n_sgb, dropped, fs, cpu / fmax(t_block - start, 1e-9));
 			next_stat += stats_s * ceil((t_block - next_stat + 1e-9) / stats_s);
 		}
-		if (report) fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, SGB accepted %lld  cpu %.2f core-s/s, wall %.2fx real time, buffered %.1f s%s",
-		        t_block, n_cand, n_acc, n_sgb, cpu / fmax(t_block - start, 1e-9), (t_block - start) / fmax(wall, 1e-9),
+		if (report) fprintf(stderr, "[%7.1f s] FGB candidates %lld accepted %lld, repeats %lld, SGB accepted %lld  cpu %.2f core-s/s, wall %.2fx real time, buffered %.1f s%s",
+		        t_block, n_cand, n_acc, n_rep, n_sgb, cpu / fmax(t_block - start, 1e-9), (t_block - start) / fmax(wall, 1e-9),
 		        (double)ahead / f1, dropped ? "" : "\n");
 		if (report && dropped) fprintf(stderr, "  DROPPED %lld samples (%.2f s)\n", dropped, dropped / fs);
 		if (eof) break;

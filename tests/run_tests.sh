@@ -4,7 +4,7 @@
 set -u
 B="${1:-$(dirname "$0")/../build}"
 pass=0; fail=0
-for t in test_fgb test_sgb; do
+for t in test_fgb test_sgb test_repeat; do
   echo "== $t"
   if "$B/$t"; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAILED: $t"; fi
 done
