@@ -6,3 +6,5 @@ __pycache__/
 build-install/
 build-install.log
 build-test/
+proto/satid_data/
+proto/tle/
