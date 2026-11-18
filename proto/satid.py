@@ -13,16 +13,18 @@ GNSS): for each burst it scores every assignment of its copies to distinct visib
 the spread of implied f0 (sigma_f) and of implied t_tx (sigma_t), and reports the best, its
 margin over the runner-up, and the implied f0 offsets (which also measure T).
 
-Every satellite has its own translation offset (about +-100-200 Hz) and delay offset (up to
-+-0.7 ms, seen as the transponder's): the script estimates them from clearly attributed bursts and
-scores again with them removed (three passes).
+Per-satellite translation and delay offsets are estimated from clearly attributed bursts and
+removed (three passes). With the station's true position they come out at +-3 Hz and +-10 us, i.e.
+nil: offsets of +-100-230 Hz and +-0.7 ms, varying with geometry, mean the station position is
+wrong (stationfit.py finds it from the bursts). The common implied-f0 offset (-67 to -93 Hz from
+406.05 MHz, drifting between days) is the receiver's own reference error.
 
 TLEs:  curl -s "https://celestrak.org/NORAD/elements/gp.php?GROUP=galileo&FORMAT=tle" > tle/galileo.tle
        curl -s "https://celestrak.org/NORAD/elements/gp.php?GROUP=glo-ops&FORMAT=tle" > tle/glo-ops.tle
 Needs skyfield (pip install skyfield).
 
-usage: satid.py records.jsonl frame_pos.json tle/galileo.tle tle/glo-ops.tle [--sar meosar_visible.py]
-       [--lat 33.749 --lon -84.388 --alt 300] [--sigma-f 15] [--sigma-t 0.15] [--max 40]
+usage: satid.py records.jsonl frame_pos.json tle/galileo.tle tle/glo-ops.tle --lat LAT --lon LON
+       [--alt M] [--sar meosar_visible.py] [--sigma-f 15] [--sigma-t 0.15] [--max 40] [--dump FILE]
 """
 from __future__ import annotations
 
@@ -78,6 +80,8 @@ def bursts_from(records, pos):
         if not hx or hx not in pos or not r.get("utc"):
             continue
         lat, lon = pos[hx][0], pos[hx][1]
+        if abs(lat - 1.0) < 1e-6 and abs(lon) < 1e-6:
+            continue   # test transmitters' placeholder position (1 N 0 E), not where they are
         if k == "sgb" and r.get("accept") and r.get("relays"):
             rel = [(x["f_hz"], x["dt_ms"] / 1000) for x in r["relays"]]
             out.append((r["utc"], r["band"], 2, hx, lat, lon, rel))
@@ -106,13 +110,14 @@ def main():
     ap.add_argument("frame_pos")
     ap.add_argument("tles", nargs="+")
     ap.add_argument("--sar", default="/home/mike/dec406/tools/meosar_visible.py")
-    ap.add_argument("--lat", type=float, default=33.749)
-    ap.add_argument("--lon", type=float, default=-84.388)
-    ap.add_argument("--alt", type=float, default=300)
+    ap.add_argument("--lat", type=float, required=True, help="station latitude (deg)")
+    ap.add_argument("--lon", type=float, required=True, help="station longitude (deg)")
+    ap.add_argument("--alt", type=float, default=100, help="station altitude (m)")
     ap.add_argument("--sigma-f", type=float, default=15.0, help="Hz")
     ap.add_argument("--sigma-t", type=float, default=0.15, help="ms")
     ap.add_argument("--min-relays", type=int, default=2)
     ap.add_argument("--max", type=int, default=40, help="bursts to print")
+    ap.add_argument("--dump", help="write one JSON line per copy of each scored burst (residuals, geometry)")
     a = ap.parse_args()
 
     ts = load.timescale()
@@ -138,25 +143,39 @@ def main():
             f_dn = T_XLATE[band] + F_NOM[gen]
             # implied f0 for a copy at f_rx: f_rx - T - D_dn - D_up
             dop = -f_dn * rr_dn / C - F_NOM[gen] * rr_up / C
-            cand.append({"cs": s["cs"], "label": s["label"], "dop": dop, "delay": (r_up + r_dn) / C, "el": el_st})
+            cand.append({"cs": s["cs"], "label": s["label"], "dop": dop, "delay": (r_up + r_dn) / C, "el": el_st,
+                         "el_bc": el_bc, "r_up": r_up, "r_dn": r_dn, "rr_up": rr_up, "rr_dn": rr_dn})
         if len(cand) >= len(rel):
             prepared.append((utc, band, gen, hx, rel, cand))
 
     def score_all(fbias, tbias):
-        """Best and runner-up assignment per burst, with per-satellite offsets removed."""
+        """Best and runner-up assignment per burst, with per-satellite offsets removed.
+        Copy 0's satellite anchors the beacon frequency; every other copy then only tries
+        satellites whose implied f0 lies within WIN_HZ of it (all others would score a chi2 in the
+        hundreds), so bursts with many copies and many visible satellites stay cheap."""
+        WIN_HZ = 500.0
         res = []
         for utc, band, gen, hx, rel, cand in prepared:
             fb = [fbias.get((band, c["label"]), 0.0) for c in cand]
             tb = [tbias.get((band, c["label"]), 0.0) for c in cand]
-            scored = []
-            for perm in itertools.permutations(range(len(cand)), len(rel)):
-                f0 = np.array([rel[k][0] - T_XLATE[band] - cand[perm[k]]["dop"] - fb[perm[k]] for k in range(len(rel))])
-                tx = np.array([rel[k][1] * 1e3 - cand[perm[k]]["delay"] * 1e3 - tb[perm[k]] for k in range(len(rel))])
-                chi_f = np.sum((f0 - f0.mean()) ** 2) / a.sigma_f ** 2
-                chi_t = np.sum((tx - tx.mean()) ** 2) / a.sigma_t ** 2
-                scored.append((chi_f + chi_t, chi_f, chi_t, perm, f0, tx))
-            scored.sort(key=lambda x: x[0])
-            res.append((utc, band, gen, hx, rel, cand, scored[0], scored[1] if len(scored) > 1 else None))
+            f0m = np.array([[rel[k][0] - T_XLATE[band] - c["dop"] - fb[j] for j, c in enumerate(cand)] for k in range(len(rel))])
+            txm = np.array([[rel[k][1] * 1e3 - c["delay"] * 1e3 - tb[j] for j, c in enumerate(cand)] for k in range(len(rel))])
+            top = []   # best two: (chi, chi_f, chi_t, perm, f0, tx)
+            for j0 in range(len(cand)):
+                ref = f0m[0, j0]
+                opts = [[j0]] + [[j for j in range(len(cand)) if abs(f0m[k, j] - ref) < WIN_HZ] for k in range(1, len(rel))]
+                for perm in itertools.product(*opts):
+                    if len(set(perm)) < len(perm):
+                        continue
+                    f0 = f0m[range(len(rel)), perm]
+                    tx = txm[range(len(rel)), perm]
+                    chi_f = float(np.sum((f0 - f0.mean()) ** 2)) / a.sigma_f ** 2
+                    chi_t = float(np.sum((tx - tx.mean()) ** 2)) / a.sigma_t ** 2
+                    top.append((chi_f + chi_t, chi_f, chi_t, perm, f0, tx))
+                    top.sort(key=lambda x: x[0])
+                    del top[2:]
+            if top:
+                res.append((utc, band, gen, hx, rel, cand, top[0], top[1] if len(top) > 1 else None))
         return res
 
     def biases(res):
@@ -193,6 +212,22 @@ def main():
     for utc, band, gen, hx, rel, cand, best, second in results:
         for k in range(len(rel)):
             resid_f[(band, gen)].append(best[4][k] - F_NOM[gen])
+
+    if a.dump:
+        with open(a.dump, "w") as out:
+            for utc, band, gen, hx, rel, cand, best, second in results:
+                margin = (second[0] - best[0]) if second else 1e9
+                for k in range(len(rel)):
+                    c = cand[best[3][k]]
+                    key = (band, c["label"])
+                    out.write(json.dumps({
+                        "utc": utc, "band": band, "gen": gen, "hex": hx, "n": len(rel), "k": k, "sat": c["label"],
+                        "f_rx": rel[k][0], "dt_ms": rel[k][1] * 1e3, "el": round(c["el"], 1), "el_bc": round(c["el_bc"], 1),
+                        "r_up": round(c["r_up"], 1), "r_dn": round(c["r_dn"], 1), "rr_up": round(c["rr_up"], 4),
+                        "rr_dn": round(c["rr_dn"], 4), "delay_ms": c["delay"] * 1e3,
+                        "f_res": float(best[4][k] - best[4].mean()), "t_res": float(best[5][k] - best[5].mean()),
+                        "fbias": fbias.get(key, 0.0), "tbias": tbias.get(key, 0.0),
+                        "chi_f": float(best[1]), "chi_t": float(best[2]), "margin": float(margin)}) + "\n")
 
     for utc, band, gen, hx, rel, cand, best, second in results[:a.max]:
         names = [cand[i]["label"] for i in best[3]]
