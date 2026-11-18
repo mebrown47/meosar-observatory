@@ -255,7 +255,7 @@ if [ -f "$CONF" ] && [ "$MODE" != reconfigure ]; then
   . "$CONF"
 else
   info "Config"
-  OBS_PORT=8896; KEEP_DAYS=30; DEC406_HEX=""; RX_ARGS=""; START_AT_BOOT=y; SHARE_WITH="-"
+  OBS_PORT=8896; KEEP_DAYS=30; DEC406_HEX=""; STATION_POS=""; RX_ARGS=""; START_AT_BOOT=y; SHARE_WITH="-"
   STATION="$(hostname -s)"
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
@@ -286,6 +286,8 @@ else
   [ -n "$CUR_KEEP" ] && { RX_ARGS+=" $CUR_KEEP"; ok "kept as they were (edit $CONF to change them): $CUR_KEEP"; }
   RX_ARGS="$(echo "$RX_ARGS" | sed 's/^ *//; s/  */ /g; s/ *$//')"
   STATION="$(ask "Station name for the dashboard" "$STATION")"
+  STATION_POS="$(ask "Station position for the globe, LAT,LON in degrees (none for none)" "${STATION_POS:-none}")"
+  [ "$STATION_POS" = none ] && STATION_POS=""
   KEEP_DAYS="$(ask "Days of raw archive to keep (0 = keep everything; the database keeps every burst)" "$KEEP_DAYS")"
   # dec406's hex decoder gives the observatory each frame's fields and position.
   def_dec="${DEC406_HEX:-}"
@@ -329,8 +331,9 @@ RUN_USER="$RUN_USER"
 # Receiver flags (source, frequency, rate, gain, feeds). -q, --archive and --stats are added for you.
 RX_ARGS="$RX_ARGS"
 
-# Station name on the dashboard.
+# Station name on the dashboard, and its position on the globe (LAT,LON; "" = not shown).
 STATION="$STATION"
+STATION_POS="$STATION_POS"
 
 # Observatory dashboard port.
 OBS_PORT="$OBS_PORT"
@@ -352,7 +355,7 @@ EOF
   ok "wrote $CONF"
 fi
 : "${OBS_PORT:=8896}" "${KEEP_DAYS:=30}" "${DEC406_HEX:=}" "${RUN_USER:=$(id -un)}"
-: "${STATION:=$(hostname -s)}" "${START_AT_BOOT:=y}" "${SHARE_WITH:=}"
+: "${STATION_POS:=}" "${STATION:=$(hostname -s)}" "${START_AT_BOOT:=y}" "${SHARE_WITH:=}"
 [ "$SHARE_WITH" = - ] && SHARE_WITH=""
 
 # ---- install files ----------------------------------------------------------
@@ -360,7 +363,8 @@ info "Installing program files to $PREFIX"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/bin" "$STAGE/observatory"
 cp "$BIN" "$STAGE/bin/"
-cp "$REPO_ROOT"/observatory/rollup.py "$REPO_ROOT"/observatory/server.py "$REPO_ROOT"/observatory/page.html "$STAGE/observatory/"
+cp "$REPO_ROOT"/observatory/{rollup.py,server.py,page.html,globe.html} "$STAGE/observatory/"
+cp -r "$REPO_ROOT"/observatory/static "$STAGE/observatory/"   # the globe's script and vendored assets
 cat > "$STAGE/bin/meosar-tidy" <<'EOF'
 #!/bin/sh
 # Compress archive files older than a day; delete those older than KEEP_DAYS (0 = never).
@@ -475,7 +479,7 @@ Type=simple
 User=$RUN_USER
 EnvironmentFile=$CONF
 WorkingDirectory=$DATA_DIR
-ExecStart=$PY $PREFIX/observatory/server.py --db $DB_PATH --port \${OBS_PORT} --host 0.0.0.0 --station "\${STATION}"
+ExecStart=$PY $PREFIX/observatory/server.py --db $DB_PATH --port \${OBS_PORT} --host 0.0.0.0 --station "\${STATION}" --where "\${STATION_POS}"
 Restart=always
 RestartSec=10
 
@@ -582,6 +586,7 @@ fi
 
 info "Done"
 say "  Observatory:  ${B}http://$IP:$OBS_PORT/${Z}   (fills in as the rollup runs, every minute)"
+say "  Globe:        ${B}http://$IP:$OBS_PORT/globe${Z}"
 say "  Settings:     $CONF  then  sudo systemctl restart meosar-rx"
 say "  Add results:  python3 $PREFIX/observatory/rollup.py --archive $ARCHIVE_DIR --db $DB_PATH FILE.jsonl ..."
 say "  Logs:         journalctl -u meosar-rx -f"

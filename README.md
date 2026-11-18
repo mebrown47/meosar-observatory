@@ -49,6 +49,14 @@ of both generations with their fields and positions, bursts over time, satellite
 receiver's status, and each beacon's burst history. A beacon is shown once it is confirmed: a
 strict decode, or bursts from two separate transmissions.
 
+`/globe` lists the beacons on the left and maps their positions on a 3D globe on the right: colour
+by beacon type, first generation round and second generation diamond, tracks joining a beacon's
+positions (broken where the implied speed is impossible, as with test beacons that alternate a
+placeholder position), and the station itself when `STATION_POS` is set in `/etc/meosar-rx.conf`.
+The globe is rtl-sdr-workbench's renderer with its vendored assets in `observatory/static/`
+(three.js, MIT; NASA Black Marble, public domain; world-atlas coastlines, ISC), so it needs no
+internet.
+
 Results from recordings can be added at any time:
 
 ```bash

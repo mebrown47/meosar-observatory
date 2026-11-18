@@ -13,6 +13,9 @@
   header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
   header h1{font-size:18px;margin:0;font-weight:650}
   header .sub{color:var(--dim);font-size:12.5px}
+  nav.pages{display:flex;gap:4px}
+  nav.pages a{color:var(--dim);text-decoration:none;padding:3px 10px;border-radius:6px;font-size:13px}
+  nav.pages a.on{color:var(--fg);background:var(--panel2)} nav.pages a:hover{color:var(--fg);text-decoration:none}
   header .right{margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--dim);font-size:12px}
   select,input{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12.5px}
   main{padding:16px 22px;max-width:1500px;margin:0 auto}
@@ -54,6 +57,7 @@
 <body>
 <header>
   <h1>MEOSAR Observatory<span id="station"></span></h1>
+  <nav class="pages"><a href="./" class="on">Tables</a><a href="globe">Globe</a></nav>
   <span class="sub">Cospas-Sarsat 406 MHz beacons relayed by Galileo (1544.1 MHz) and GLONASS-K (1544.9 MHz) SAR transponders</span>
   <span class="right">
     <label>Window <select id="hours">
@@ -224,7 +228,9 @@ async function refresh() {
 }
 $("hours").onchange = () => { try { localStorage.setItem("meosar.hours", $("hours").value); } catch (e) {} refresh(); };
 $("q").oninput = () => S && beacons();
-refresh();
+// A beacon linked from the globe (?beacon=ID): open its detail once the data is in.
+const want = new URLSearchParams(location.search).get("beacon");
+refresh().then(() => { if (want) detail(want); });
 setInterval(refresh, 30000);
 </script>
 </body>

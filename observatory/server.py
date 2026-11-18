@@ -7,13 +7,16 @@ MEOSAR Observatory: the dashboard server
 A small read-only HTTP server over the database rollup.py builds from meosar-rx's archive.
 Stdlib only, no external assets. Follows inmarsat-rx's observatory server.
 
-  GET /                 -> the dashboard
-  GET /api/overview     -> its data (?hours=N, 0 = everything)
+  GET /                 -> the dashboard (tables)
+  GET /globe            -> the globe: beacons on the left, their positions and tracks on a globe
+  GET /api/overview     -> the dashboard's data (?hours=N, 0 = everything)
+  GET /api/map          -> the globe's data (?hours=N)
   GET /api/beacon?id=B  -> one beacon: decoded fields and its bursts
+  GET /static/...       -> the globe's script and its vendored assets (three.js, Earth texture, coastlines)
   GET /healthz          -> ok
 
 Usage:
-    server.py [--db PATH] [--port 8896] [--host 0.0.0.0] [--station NAME]
+    server.py [--db PATH] [--port 8896] [--host 0.0.0.0] [--station NAME] [--where LAT,LON]
 """
 
 import argparse
@@ -172,20 +175,63 @@ def build_beacon(db, bid):
         con.close()
 
 
+def build_map(db, hours, where):
+    """Confirmed beacons of both generations with their last known position and track."""
+    ov = build_overview(db, hours)
+    if ov.get("empty"):
+        return {**ov, "station": where}
+    t0 = ov["newest"] - ov["hours"] * 3600 if ov["hours"] > 0 else 0
+    con = connect_ro(db)
+    try:
+        tracks = {}
+        for table in ("fgb_bursts", "sgb_bursts"):
+            for bid, t, lat, lon in con.execute(
+                    f"SELECT b.bid, b.t, f.lat, f.lon FROM {table} b JOIN frames f ON f.hex=b.hex "
+                    "WHERE b.t>=? AND f.lat IS NOT NULL ORDER BY b.t", (t0,)):
+                tr = tracks.setdefault(bid, [])
+                p = [round(t), round(lat, 4), round(lon, 4)]
+                if tr and tr[-1][1:] == p[1:]:
+                    tr[-1][0] = p[0]          # same place again: keep the latest time
+                else:
+                    tr.append(p)
+    finally:
+        con.close()
+    items = []
+    for gen, lst in ((1, ov["beacons"]), (2, ov["sgb"])):
+        for b in lst:
+            tr = tracks.get(b["id"], [])
+            items.append({"id": b["id"], "gen": gen, "btype": "test" if gen == 2 and b.get("test") else b.get("btype"),
+                          "ident": b.get("ident") or b.get("protocol"), "country": b.get("country"),
+                          "country_name": b.get("country_name"), "bursts": b["bursts"], "ebn0": b["ebn0"],
+                          "relays": b["relays"], "first": b["first"], "last": b["last"], "selftest": b.get("selftest"),
+                          "fields": b.get("fields", []), "hex": b.get("hex"),
+                          "tac": b.get("tac"), "serial": b.get("serial"),
+                          "lat": tr[-1][1] if tr else None, "lon": tr[-1][2] if tr else None,
+                          "track": tr[-500:]})
+    items.sort(key=lambda b: -b["last"])
+    return {"generated": ov["generated"], "newest": ov["newest"], "hours": ov["hours"], "items": items,
+            "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"]}
+
+
+STATIC_TYPES = {".js": "text/javascript", ".json": "application/json", ".jpg": "image/jpeg", ".css": "text/css",
+                ".md": "text/plain; charset=utf-8", "": "text/plain; charset=utf-8"}
+
+
 class Handler(BaseHTTPRequestHandler):
     db_path = DB_PATH
     station = ""
+    where = None
     server_version = "meosar-observatory"
 
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, cache="no-store"):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -203,9 +249,24 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         arg = lambda k: (q.get(k, [None])[0] or None)
-        if u.path in ("/", "/index.html"):
-            with open(os.path.join(HERE, "page.html"), encoding="utf-8") as f:
+        if u.path in ("/", "/index.html", "/globe"):
+            name = "globe.html" if u.path == "/globe" else "page.html"
+            with open(os.path.join(HERE, name), encoding="utf-8") as f:
                 self._send(200, f.read().replace("__STATION__", self.station), "text/html; charset=utf-8")
+        elif u.path.startswith("/static/"):
+            root = os.path.join(HERE, "static")
+            path = os.path.realpath(os.path.join(root, u.path[len("/static/"):]))
+            if not path.startswith(root + os.sep) or not os.path.isfile(path):
+                self._send(404, "not found", "text/plain")
+                return
+            with open(path, "rb") as f:
+                body = f.read()
+            ext = os.path.splitext(path)[1]
+            # The vendored assets never change; the page's own script may, with an update.
+            cache = "max-age=86400" if "/vendor/" in path else "no-cache"
+            self._send(200, body, STATIC_TYPES.get(ext, "application/octet-stream"), cache)
+        elif u.path == "/api/map":
+            self._json(build_map, self.db_path, arg("hours"), self.where)
         elif u.path == "/api/overview":
             self._json(build_overview, self.db_path, arg("hours"))
         elif u.path == "/api/beacon":
@@ -224,9 +285,15 @@ def main():
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--station", default="", help="station name for the page header")
+    ap.add_argument("--where", default="", help="station position LAT,LON for the globe (empty = not shown)")
     a = ap.parse_args()
     Handler.db_path = a.db
     Handler.station = a.station
+    try:
+        lat, lon = (float(x) for x in a.where.split(","))
+        Handler.where = {"lat": lat, "lon": lon}
+    except ValueError:
+        Handler.where = None
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"meosar observatory: http://{a.host}:{a.port}/  db={a.db}", flush=True)
     try:

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEOSAR Globe</title>
+<style>
+  /* The observatory's dark station style; the globe as in rtl-sdr-workbench's globe page */
+  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c232c;--line:#2b333d;--fg:#e6edf3;--dim:#8b98a5;
+    --accent:#4aa8ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--sgb:#c297ff;--abyss:#04080e;--glass:rgba(14,23,36,.82)}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  button,select,input{font:inherit;color:inherit}
+  .app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650}
+  nav.pages{display:flex;gap:4px}
+  nav.pages a{color:var(--dim);text-decoration:none;padding:3px 10px;border-radius:6px;font-size:13px}
+  nav.pages a.on{color:var(--fg);background:var(--panel2)} nav.pages a:hover{color:var(--fg)}
+  header .right{margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--dim);font-size:12px}
+  select,input{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12.5px}
+  .body{display:grid;grid-template-columns:400px 1fr;min-height:0}
+  /* Left: records */
+  .side{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);background:var(--panel)}
+  .side .tools{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim);cursor:pointer;user-select:none;background:none}
+  .chip[aria-pressed="true"]{color:var(--fg);border-color:var(--accent);background:#14273b}
+  .chip i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:0}
+  .counts{color:var(--dim);font-size:12px}
+  .counts b{color:var(--fg);font-weight:600}
+  #sel{border-bottom:1px solid var(--line);padding:10px 12px;max-height:46%;overflow-y:auto;background:var(--panel2)}
+  #sel h2{margin:0 0 4px;font-size:14px;display:flex;gap:8px;align-items:center}
+  #sel h2 .x{margin-left:auto;cursor:pointer;color:var(--dim);font-size:18px;line-height:1;background:none;border:0}
+  #sel dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:6px 0;font-size:12px}
+  #sel dt{color:var(--dim)} #sel dd{margin:0;font-variant-numeric:tabular-nums}
+  #sel .fields{font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);white-space:pre-wrap;margin:6px 0 0}
+  #sel .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .rows{list-style:none;margin:0;padding:4px;overflow-y:auto;flex:1}
+  .rows li{display:grid;grid-template-columns:12px 1fr auto;gap:8px;align-items:center;padding:5px 7px;border-radius:7px;cursor:pointer}
+  .rows li:hover,.rows li[aria-selected="true"]{background:#1d2a3a}
+  .rows li.nopos .who{color:var(--dim)}
+  .rows i{width:9px;height:9px;border-radius:50%} .rows i.d{border-radius:1px;transform:rotate(45deg);width:8px;height:8px}
+  .rows .who{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
+  .rows .who b{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:500}
+  .rows .who small{display:block;color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis}
+  .rows .age{color:var(--dim);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-align:right}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  /* Right: globe */
+  .stage{position:relative;min-height:0;background:var(--abyss)}
+  #globe{position:absolute;inset:0}
+  #globe canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}
+  .over{position:absolute;display:flex;gap:6px;padding:6px;background:var(--glass);border:1px solid var(--line);border-radius:10px;z-index:2;flex-wrap:wrap;align-items:center}
+  .over.tl{top:10px;left:10px} .over.bl{bottom:10px;left:10px} .over.br{bottom:10px;right:10px;max-width:360px;font-size:11.5px;color:var(--dim)}
+  .over button.v{min-width:34px;height:30px;border-radius:7px;border:1px solid var(--line);background:var(--panel2);cursor:pointer;padding:0 9px}
+  .over button.v[aria-pressed="true"]{border-color:var(--accent);background:#14273b}
+  .lbl{font-size:10px;letter-spacing:.12em;color:#62748a;margin:0 2px}
+  #labels{position:absolute;inset:0;pointer-events:none;z-index:1;overflow:hidden}
+  #labels span{position:absolute;transform:translate(9px,-50%);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--fg);text-shadow:0 0 3px #000,0 0 6px #000;white-space:nowrap}
+  #labels span.sel{color:#fff;font-weight:600} #labels span.st{color:#ffd08a}
+  #empty{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:420px;text-align:center;padding:14px 18px;background:var(--glass);border:1px solid var(--line);border-radius:12px;color:var(--dim);z-index:2}
+  @media (max-width:820px){.body{grid-template-columns:1fr;grid-template-rows:45vh 1fr}.side{border-right:0;border-bottom:1px solid var(--line)}}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>MEOSAR Observatory<span id="station"></span></h1>
+    <nav class="pages"><a href="./">Tables</a><a href="globe" class="on">Globe</a></nav>
+    <span class="right">
+      <label>Window <select id="hours">
+        <option value="1">1 hour</option><option value="6">6 hours</option><option value="24" selected>24 hours</option>
+        <option value="72">3 days</option><option value="168">7 days</option><option value="720">30 days</option><option value="0">everything</option>
+      </select></label>
+      <span id="status">loading…</span>
+    </span>
+  </header>
+  <div class="body">
+    <aside class="side" aria-label="Beacons">
+      <div class="tools">
+        <div class="counts" id="counts"></div>
+        <div class="chips" id="types" aria-label="Beacon types"></div>
+        <div class="chips">
+          <button type="button" class="chip" data-opt="nopos" aria-pressed="false" title="List beacons whose frames carry no position too">Without position</button>
+          <button type="button" class="chip" data-opt="tracks" aria-pressed="true">Tracks</button>
+          <button type="button" class="chip" data-opt="labels" aria-pressed="true">Labels</button>
+        </div>
+        <input id="q" type="search" placeholder="Search ID, country, identification…" aria-label="Search beacons">
+      </div>
+      <div id="sel" hidden></div>
+      <ol class="rows" id="list"></ol>
+    </aside>
+    <div class="stage">
+      <div id="globe" aria-label="Globe of beacon positions; click a marker to select it"></div>
+      <div id="labels" aria-hidden="true"></div>
+      <div class="over tl">
+        <span class="lbl">MAP</span>
+        <button type="button" class="chip" data-map="coast" aria-pressed="true">Coastlines</button>
+        <button type="button" class="chip" data-map="grid" aria-pressed="true">Grid</button>
+        <button type="button" class="chip" data-map="lights" aria-pressed="true">City lights</button>
+      </div>
+      <div class="over bl">
+        <button type="button" class="v" id="zin" title="Zoom in (or mouse wheel)">+</button>
+        <button type="button" class="v" id="zout" title="Zoom out (or mouse wheel)">−</button>
+        <button type="button" class="v" id="fit" title="Fit every beacon shown">Fit</button>
+        <button type="button" class="v" id="reset" title="Back to the starting view">Reset</button>
+        <button type="button" class="v" id="spin" aria-pressed="false" title="Rotate slowly">Spin</button>
+      </div>
+      <div class="over br" id="legend"></div>
+      <div id="empty" hidden></div>
+    </div>
+  </div>
+</div>
+<script type="module">
+import {Globe} from './static/globe.js';
+
+const STATION = "__STATION__";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const ts = t => t ? new Date(t * 1000).toISOString().slice(0, 19).replace("T", " ") + " UTC" : "—";
+const age = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? Math.round(s) + "s" : s < 5400 ? Math.round(s / 60) + "m" : s < 172800 ? (s / 3600).toFixed(1) + "h" : (s / 86400).toFixed(1) + "d"; };
+const f1 = x => x == null ? "—" : Number(x).toFixed(1);
+const fmtPos = (lat, lon) => `${Math.abs(lat).toFixed(4)}°${lat >= 0 ? "N" : "S"} ${Math.abs(lon).toFixed(4)}°${lon >= 0 ? "E" : "W"}`;
+// Colour by beacon type; first generation round, second generation diamond, the station square.
+const COLORS = {ELT: "#5fb4ff", EPIRB: "#2fd1b8", PLB: "#ff8a65", SSAS: "#ff4d5a", RLS: "#c792ea", test: "#ffa94d",
+                orbitography: "#9fb0c2", SGB: "#c297ff", other: "#8b98a5"};
+const colorOf = b => COLORS[b.btype] || (b.gen === 2 ? COLORS.SGB : COLORS.other);
+const SHAPE = {circle: 0, square: 1, diamond: 2};
+const km = (a, b) => { const r = Math.PI / 180, d = Math.sin((b[1] - a[1]) * r / 2) ** 2 + Math.cos(a[1] * r) * Math.cos(b[1] * r) * Math.sin((b[2] - a[2]) * r / 2) ** 2; return 12742 * Math.asin(Math.sqrt(d)); };
+// A beacon's positions as tracks, broken wherever the implied speed is impossible (over 1000 km/h,
+// faster than any aircraft carrying an ELT): test beacons alternate placeholder and real positions.
+function tracksOf(b) {
+  const out = [];
+  let cur = [];
+  for (let i = 0; i < b.track.length; i++) {
+    const p = b.track[i], q = b.track[i - 1];
+    if (q && km(q, p) / Math.max(1, p[0] - q[0]) * 3600 > 1000) { if (cur.length > 1) out.push(cur); cur = []; }
+    cur.push({lat: p[1], lon: p[2]});
+  }
+  if (cur.length > 1) out.push(cur);
+  return out;
+}
+const nameOf = b => b.gen === 2 ? `TAC ${b.tac} #${b.serial}` : b.id;
+
+let D = null, selected = null, fitted = false;
+const opts = {nopos: false, tracks: true, labels: true}, typeOff = new Set();
+try { Object.assign(opts, JSON.parse(localStorage.getItem("meosar.globe.opts") || "{}")); (JSON.parse(localStorage.getItem("meosar.globe.off") || "[]")).forEach(t => typeOff.add(t)); } catch (e) {}
+try { const h = localStorage.getItem("meosar.hours"); if (h !== null) $("hours").value = h; } catch (e) {}
+const save = () => { try { localStorage.setItem("meosar.globe.opts", JSON.stringify(opts)); localStorage.setItem("meosar.globe.off", JSON.stringify([...typeOff])); } catch (e) {} };
+if (STATION) { $("station").textContent = " · " + STATION; document.title = "MEOSAR Globe · " + STATION; }
+
+let globe;
+try { globe = new Globe($("globe"), {onPick: it => select(it?.id ?? null, false), onView: () => labels()}); }
+catch (e) {
+  $("empty").hidden = false;
+  $("empty").textContent = "The globe needs WebGL, which this browser cannot provide. The tables page shows the same beacons.";
+  throw e;
+}
+for (const b of document.querySelectorAll("[data-map]")) b.onclick = () => { const on = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", String(on)); globe.setLayer(b.dataset.map, on); };
+for (const b of document.querySelectorAll("[data-opt]")) {
+  b.setAttribute("aria-pressed", String(!!opts[b.dataset.opt]));
+  b.onclick = () => { opts[b.dataset.opt] = !opts[b.dataset.opt]; b.setAttribute("aria-pressed", String(opts[b.dataset.opt])); save(); draw(); };
+}
+$("zin").onclick = () => globe.zoom(1 / 1.4);
+$("zout").onclick = () => globe.zoom(1.4);
+$("reset").onclick = () => globe.reset();
+$("fit").onclick = () => fitShown();
+$("spin").onclick = () => { const on = $("spin").getAttribute("aria-pressed") !== "true"; $("spin").setAttribute("aria-pressed", String(on)); globe.setSpin(on); };
+$("q").oninput = () => list();
+$("hours").onchange = () => { try { localStorage.setItem("meosar.hours", $("hours").value); } catch (e) {} fitted = false; load(); };
+addEventListener("keydown", e => { if (e.key === "Escape") select(null); });
+
+const typeOn = b => !typeOff.has(b.btype || "other");
+const mapped = () => D.items.filter(b => b.lat != null && typeOn(b));
+function fitShown() {
+  const pts = mapped().map(b => ({lat: b.lat, lon: b.lon}));
+  if (D.station) pts.push(D.station);
+  if (pts.length) globe.fit(pts);
+}
+
+async function load() {
+  try {
+    D = await (await fetch("api/map?hours=" + $("hours").value, {cache: "no-store"})).json();
+    if (D.empty) { $("status").textContent = "no data yet"; D.items = []; }
+    else $("status").textContent = `newest ${new Date(D.newest * 1000).toISOString().slice(11, 16)} UTC`;
+  } catch (e) { $("status").textContent = "cannot reach the station"; return; }
+  if (selected && !D.items.some(b => b.id === selected)) selected = null;
+  draw();
+  if (!fitted && (D.items.some(b => b.lat != null) || D.station)) { fitted = true; fitShown(); }
+}
+
+function draw() {
+  if (!D) return;
+  // Type chips with counts.
+  const n = {};
+  for (const b of D.items) n[b.btype || "other"] = (n[b.btype || "other"] || 0) + 1;
+  $("types").innerHTML = Object.entries(n).sort((a, b) => b[1] - a[1]).map(([t, c]) =>
+    `<button type="button" class="chip" data-t="${esc(t)}" aria-pressed="${!typeOff.has(t)}"><i style="background:${COLORS[t] || COLORS.other}"></i>${esc(t)} ${c}</button>`).join("");
+  $("types").querySelectorAll(".chip").forEach(c => c.onclick = () => { const t = c.dataset.t; typeOff.has(t) ? typeOff.delete(t) : typeOff.add(t); save(); draw(); });
+  const withPos = D.items.filter(b => b.lat != null).length;
+  $("counts").innerHTML = `<b>${D.items.length}</b> beacons · <b>${withPos}</b> with a position · ${D.items.filter(b => b.gen === 2).length} second generation`;
+  // Globe.
+  const shown = mapped(), items = shown.map(b => ({id: b.id, lat: b.lat, lon: b.lon, color: colorOf(b), size: b.id === selected ? 12 : 9,
+    shape: b.gen === 2 ? SHAPE.diamond : SHAPE.circle, data: b}));
+  if (D.station) items.push({id: "station", lat: D.station.lat, lon: D.station.lon, color: "#ffd08a", size: 11, shape: SHAPE.square, data: null});
+  globe.setItems(items);
+  globe.select(selected);
+  globe.setTracks(opts.tracks ? shown.filter(b => b.track.length > 1).flatMap(b => tracksOf(b).map(points => ({color: b.id === selected ? "#ffffff" : colorOf(b), points}))) : []);
+  $("legend").innerHTML = (D.station ? `<span><i style="display:inline-block;width:9px;height:9px;background:#ffd08a;margin-right:5px"></i>${esc(STATION || "station")}</span> · ` : "") +
+    "● first generation · ◆ second generation · lines join a beacon's positions";
+  $("empty").hidden = !!shown.length;
+  if (!shown.length) $("empty").textContent = D.items.length ? "No beacon in this window and selection reports a position." : "No beacons in this window yet.";
+  list();
+  if (selected) detail();
+}
+
+function list() {
+  if (!D) return;
+  const q = $("q").value.trim().toLowerCase();
+  const L = D.items.filter(b => typeOn(b) && (opts.nopos || b.lat != null) &&
+    (!q || [b.id, b.hex, b.btype, b.ident, b.country_name, String(b.country), b.tac, b.serial].join(" ").toLowerCase().includes(q)));
+  $("list").replaceChildren(...L.slice(0, 500).map(b => {
+    const li = document.createElement("li");
+    li.className = b.lat == null ? "nopos" : "";
+    li.setAttribute("aria-selected", String(b.id === selected));
+    li.innerHTML = `<i class="${b.gen === 2 ? "d" : ""}" style="background:${colorOf(b)}"></i>` +
+      `<span class="who"><b>${esc(nameOf(b))}</b> ${esc(b.country_name || "")}<small>${esc(b.btype || "")} · ${esc(b.ident || "")}${b.lat == null ? " · no position" : ""}</small></span>` +
+      `<span class="age">${age(b.last)}<br>${b.bursts}×</span>`;
+    li.onclick = () => select(b.id, true);
+    return li;
+  }));
+}
+
+function select(id, fly) {
+  if (id === "station") { globe.flyTo(D.station.lat, D.station.lon); return; }
+  selected = id;
+  globe.select(id);
+  $("sel").hidden = !id;
+  draw();
+  const b = id && D.items.find(x => x.id === id);
+  if (b && fly && b.lat != null) globe.flyTo(b.lat, b.lon, Math.min(globe.view.dist, 1.6));
+}
+
+function detail() {
+  const b = D.items.find(x => x.id === selected);
+  if (!b) { $("sel").hidden = true; return; }
+  const rows = [
+    ["Type", `${b.btype || ""}${b.selftest ? " (self-test)" : ""}`], ["Identification", b.ident], ["Country", `${b.country_name || ""} ${b.country ?? ""}`],
+    ["Position", b.lat != null ? `<a href="https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=9/${b.lat}/${b.lon}" target="_blank" rel="noopener">${fmtPos(b.lat, b.lon)}</a>` +
+      (b.track.length > 1 ? ` · ${b.track.length} positions` : "") : "none in its frames"],
+    ["Bursts", `${b.bursts} in this window · best Eb/N0 ${f1(b.ebn0)} dB · up to ${b.relays} satellites`],
+    ["First heard", ts(b.first)], ["Last heard", `${ts(b.last)} (${age(b.last)} ago)`],
+  ];
+  $("sel").innerHTML = `<h2><i style="display:inline-block;width:10px;height:10px;border-radius:${b.gen === 2 ? "1px" : "50%"};background:${colorOf(b)}"></i>` +
+    `<span style="font-family:ui-monospace,monospace">${esc(nameOf(b))}</span><button type="button" class="x" id="selx" title="Close">×</button></h2>` +
+    `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${k === "Position" ? v : esc(v)}</dd>`).join("")}</dl>` +
+    (b.fields && b.fields.length ? `<div class="fields">${b.fields.map(esc).join("\n")}</div>` : "") +
+    `<div class="acts">${b.lat != null ? '<button type="button" class="chip" id="selc">Center on globe</button>' : ""}` +
+    (b.track.length > 1 ? '<button type="button" class="chip" id="selt">Fit track</button>' : "") +
+    `<a class="chip" href="./?beacon=${encodeURIComponent(b.id)}">All bursts in the tables</a></div>`;
+  $("selx").onclick = () => select(null);
+  if ($("selc")) $("selc").onclick = () => globe.flyTo(b.lat, b.lon, Math.min(globe.view.dist, 1.6));
+  if ($("selt")) $("selt").onclick = () => globe.fit(b.track.map(p => ({lat: p[1], lon: p[2]})));
+}
+
+// Labels: the selected beacon and the station always; others when few enough or zoomed in.
+const pool = [];
+function labels() {
+  if (!D) return;
+  const box = $("labels");
+  let n = 0;
+  const put = (lat, lon, text, cls) => {
+    const p = globe.screenOf(lat, lon);
+    if (!p) return;
+    const s = pool[n] ?? (pool[n] = box.appendChild(document.createElement("span")));
+    s.hidden = false; s.className = cls; s.textContent = text; s.style.left = p.x + "px"; s.style.top = p.y + "px"; n++;
+  };
+  const shown = mapped();
+  if (opts.labels && (shown.length <= 40 || globe.view.dist < 1.9))
+    for (const b of shown) { if (n >= 120) break; if (b.id !== selected) put(b.lat, b.lon, b.gen === 2 ? nameOf(b) : (b.ident || b.id).slice(0, 28), ""); }
+  if (D.station) put(D.station.lat, D.station.lon, STATION || "station", "st");
+  const s = selected && shown.find(b => b.id === selected);
+  if (s) put(s.lat, s.lon, s.gen === 2 ? nameOf(s) : (s.ident || s.id), "sel");
+  for (let i = n; i < pool.length; i++) pool[i].hidden = true;
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
