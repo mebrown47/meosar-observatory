@@ -33,6 +33,12 @@ import satattr as SA   # noqa: E402
 
 C = SA.C
 CAP = 60.0          # per-burst chi2 cap
+# Noise models: (sigma_f Hz, sigma_t ms by generation). LOOSE for the global search, where a sharp
+# minimum could fall between grid points; TIGHT for the refinement, from the scatter of clearly
+# attributed copies (median-based: ~1.3 Hz; ~9 us SGB, ~45 us FGB), with room for the heavy tails
+# (the per-burst cap discards a burst with a bad copy).
+LOOSE = (SA.SIG_F, {1: SA.SIG_T, 2: SA.SIG_T})
+TIGHT = (2.5, {1: 0.060, 2: 0.015})
 MIN_EL_BC = 0.0
 
 
@@ -47,9 +53,10 @@ def bursts_of(con, bid, max_bursts):
         rows = [rows[i] for i in sorted(set(idx))]
     out = []
     for burst, t, band, lat, lon in rows:
-        cp = con.execute("SELECT f_hz, tc FROM copies WHERE gen=? AND burst=? ORDER BY k", (gen, burst)).fetchall()
+        cp = con.execute("SELECT f_hz, tc, ebn0 FROM copies WHERE gen=? AND burst=? ORDER BY k", (gen, burst)).fetchall()
         t0 = min(c[1] for c in cp)
         out.append({"t": t, "band": band, "gen": gen, "f": np.array([c[0] for c in cp]),
+                    "eb": np.array([c[2] if c[2] is not None else -99.0 for c in cp]),
                     "dt": np.array([(c[1] - t0) * 1e3 for c in cp]), "lat": lat, "lon": lon})
     return gen, out
 
@@ -90,7 +97,7 @@ def prepare(bursts, tles, station):
     return out
 
 
-def burst_chi(b, xyz, up, want_perm=False):
+def burst_chi(b, xyz, up, want_perm=False, model=LOOSE):
     """Best-assignment chi2 of burst b at each trial position (G,)."""
     d = b["R"][None, :, :] - xyz[:, None, :]                         # G,S,3
     r_up = np.linalg.norm(d, axis=-1)                                # G,S
@@ -112,7 +119,7 @@ def burst_chi(b, xyz, up, want_perm=False):
         p = P[i:i + 2000]                                            # Q,n
         fs = f0[:, p, ks]                                            # G,Q,n
         ts = tx[:, p, ks]
-        chi = (fs.var(-1) * n / SA.SIG_F ** 2 + ts.var(-1) * n / SA.SIG_T ** 2)
+        chi = (fs.var(-1) * n / model[0] ** 2 + ts.var(-1) * n / model[1][b["gen"]] ** 2)
         chi = np.where(bad[:, p].any(-1), np.inf, chi)
         j = chi.argmin(1)
         c = chi[np.arange(len(xyz)), j]
@@ -122,12 +129,12 @@ def burst_chi(b, xyz, up, want_perm=False):
     return (best, bestp) if want_perm else best
 
 
-def score(prep, lat, lon):
+def score(prep, lat, lon, model=LOOSE):
     xyz, up = ecef_grid(lat, lon)
     tot = np.zeros(len(lat))
     fit = np.zeros(len(lat), dtype=int)
     for b in prep:
-        c = burst_chi(b, xyz, up)
+        c = burst_chi(b, xyz, up, model=model)
         n = len(b["f"])
         tot += np.minimum(c, CAP)
         fit += c < 3 * n
@@ -138,6 +145,21 @@ def gc_km(lat1, lon1, lat2, lon2):
     r = math.radians
     h = math.sin(r(lat2 - lat1) / 2) ** 2 + math.cos(r(lat1)) * math.cos(r(lat2)) * math.sin(r(lon2 - lon1) / 2) ** 2
     return 12742 * math.asin(math.sqrt(min(1, h)))
+
+
+def strongest(prep, m=3):
+    """The bursts cut down to their m strongest copies: any subset of a burst's copies must agree
+    too, and m copies cost far fewer assignments (the coarse global search)."""
+    out = []
+    for b in prep:
+        n = len(b["f"])
+        if n <= m:
+            out.append(b)
+            continue
+        keep = np.sort(np.argsort(-b["eb"])[:m])
+        out.append({**b, "f": b["f"][keep], "dt": b["dt"][keep], "eb": b["eb"][keep],
+                    "perms": np.array(list(itertools.permutations(range(len(b["R"])), m)), dtype=np.int16)})
+    return out
 
 
 def locate(prep, station_ll, coarse=2.0):
@@ -151,7 +173,7 @@ def locate(prep, station_ll, coarse=2.0):
             if gc_km(station_ll[0], station_ll[1], x, y) < 80 * 111.2:
                 lats.append(x); lons.append(y)
     lats, lons = np.array(lats), np.array(lons)
-    tot, fit = score(prep, lats, lons)
+    tot, fit = score(strongest(prep), lats, lons)
     order = np.argsort(tot)
     seeds = []
     for i in order:
@@ -162,21 +184,32 @@ def locate(prep, station_ll, coarse=2.0):
     results = []
     for la0, lo0, _ in seeds:
         c = (la0, lo0)
-        r95 = None
+        grids = []
         for span, step in ((3.0, 0.25), (0.4, 0.02), (0.04, 0.002)):
             g = np.arange(-span, span + step / 2, step)
             LA, LO = np.meshgrid(c[0] + g, c[1] + g / max(0.2, math.cos(math.radians(c[0]))), indexing="ij")
-            t2, f2 = score(prep, LA.ravel(), LO.ravel())
+            t2, f2 = score(prep, LA.ravel(), LO.ravel(), LOOSE if step > 0.1 else TIGHT)
             i = t2.argmin()
             c = (LA.ravel()[i], LO.ravel()[i])
-            if step < 0.1:
-                # 95% region (delta chi2 6 for two parameters): its farthest point from the best
-                inside = t2 <= t2[i] + 6.0
-                d = max(gc_km(c[0], c[1], x, y) for x, y in zip(LA.ravel()[inside], LO.ravel()[inside]))
-                # the finest grid's estimate, unless the region runs off that grid
-                if r95 is None or d < span * 111.2 * 0.8:
-                    r95 = max(d, step * 111.2 / 2)
-        results.append((t2[i], f2[i], c, r95))
+            grids.append((span, step, LA.ravel(), LO.ravel(), t2))
+        best, fit = t2[i], f2[i]
+        # The noise model (SIG_F, SIG_T) is a guess: scale chi2 by the bursts that fit at the best
+        # position (reduced chi2; each burst of n copies has 2(n-1) degrees of freedom).
+        xyz, up = ecef_grid(np.array([c[0]]), np.array([c[1]]))
+        chis = [(burst_chi(b, xyz, up, model=TIGHT)[0], len(b["f"])) for b in prep]
+        ok = [(x, n) for x, n in chis if x < 3 * n]
+        scale = sum(x for x, _ in ok) / max(1, sum(2 * (n - 1) for _, n in ok)) if ok else 1.0
+        scale = max(scale, 0.05)
+        # 95% region: delta chi2 6 (two parameters) after scaling; its farthest point from the best,
+        # from the finest grid it fits inside (or the coarse one's extent, as a lower bound).
+        r95, edge = None, False
+        for span, step, la_, lo_, t_ in reversed(grids[1:]):
+            inside = t_ <= t_.min() + 6.0 * scale
+            d = max(gc_km(c[0], c[1], x, y) for x, y in zip(la_[inside], lo_[inside]))
+            r95, edge = max(d, step * 111.2 / 2), d >= span * 111.2 * 0.8
+            if not edge:
+                break
+        results.append((best, fit, c, r95, edge, scale))
     results.sort(key=lambda r: r[0])
     return results, (lats, lons, tot)
 
@@ -208,9 +241,9 @@ def main():
             continue
         span_h = (prep[-1]["t"] - prep[0]["t"]) / 3600
         res, _ = locate(prep, st_ll)
-        (tot, fit, (la, lo), r95) = res[0]
+        (tot, fit, (la, lo), r95, edge, scale) = res[0]
         alt = "; ".join(f"{r[2][0]:.2f},{r[2][1]:.2f} score {r[0]:.0f} fit {r[1]}" for r in res[1:])
-        line = (f"{bid}: {la:.3f}, {lo:.3f} +-{r95:.1f} km  score {tot:.0f}, {fit}/{len(prep)} bursts fit  "
+        line = (f"{bid}: {la:.3f}, {lo:.3f} +-{'>' if edge else ''}{r95:.1f} km (chi2 scale {scale:.2f})  score {tot:.0f}, {fit}/{len(prep)} bursts fit  "
                 f"({len(prep)} bursts over {span_h:.1f} h, {time.time() - t_start:.0f} s)  next: {alt}")
         if a.truth:
             tr = [(b["lat"], b["lon"]) for b in prep if b["lat"] is not None]
