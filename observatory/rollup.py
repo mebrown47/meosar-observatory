@@ -28,6 +28,11 @@ Follows inmarsat-rx's and vdl2-observatory's rollup.py.
     station's position (--where) and python3-sgp4. TLEs are fetched daily into --tle-dir.
   * Schema 2 added the copies; a database from schema 1 is rebuilt from its source files (all
     still present) on the first run, keeping the decoded frames.
+  * Dropped samples: receiver builds before the "utc_dropfix" start-record marker let records' UTC
+    fall behind by the samples dropped since start (26.8 s after one overrun on 2026-11-18), which
+    puts the satellites in the wrong place for attribution. Such runs are corrected here by the
+    dropped_s of the latest status record (records in the ten minutes before the status record
+    that first reports a drop stay uncorrected). Schema 3 rebuilds once to apply it.
 
 Usage:
     rollup.py [--archive DIR] [--db PATH] [--dec406 PATH] [--where LAT,LON] [--tle-dir DIR] [-v] [FILE ...]
@@ -38,6 +43,7 @@ FILE arguments are ingested as well as the archive: results from recordings, say
 import argparse
 import fcntl
 import glob
+import gzip
 import json
 import os
 import re
@@ -49,7 +55,7 @@ from datetime import datetime
 
 import satattr
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 GROUP_S = 1.5
 
 
@@ -113,20 +119,27 @@ def init_db(con):
 
 
 def rebuild(con):
-    """Schema 1 -> 2: empty the burst tables and read every source file again from the start, so
-    the bursts get their copies. Returns the files to read, or None (and changes nothing) if a
-    source file is gone, since its bursts could not be read back."""
-    files = [r[0] for r in con.execute("SELECT file FROM ingest_state")]
+    """An older schema: empty the burst tables and read every source file again from the start
+    (schema 2: so the bursts get their copies; 3: so dropped-sample corrections apply). Returns the
+    files to read, or None (and changes nothing) if a source file is gone, since its bursts could
+    not be read back."""
+    files = []
+    for (f,) in con.execute("SELECT file FROM ingest_state").fetchall():
+        if not os.path.isfile(f) and os.path.isfile(f + ".gz"):   # compressed since by meosar-tidy
+            con.execute("UPDATE ingest_state SET file=? WHERE file=?", (f + ".gz", f))
+            f += ".gz"
+        files.append(f)
     gone = [f for f in files if not os.path.isfile(f)]
     if gone:
-        print(f"rollup: not rebuilding for satellite attribution: {len(gone)} source file(s) gone "
-              f"({gone[0]}...); older bursts stay without their copies", file=sys.stderr)
+        print(f"rollup: not rebuilding for the new schema: {len(gone)} source file(s) gone "
+              f"({gone[0]}...); older bursts stay as they are", file=sys.stderr)
         return None
     for tb in ("fgb_bursts", "sgb_bursts", "cand_hourly", "rx_events", "copies", "attr"):
         con.execute(f"DELETE FROM {tb}")
+    con.execute("DELETE FROM meta WHERE key LIKE 'drops:%'")
     con.execute("UPDATE ingest_state SET offset=0, size=0")
     con.commit()
-    print(f"rollup: rebuilding from {len(files)} source file(s) to keep each burst's relayed copies")
+    print(f"rollup: rebuilding from {len(files)} source file(s) for the new schema")
     return files
 
 
@@ -243,6 +256,27 @@ class Ingest:
         self.con, self.tool, self.seen = con, tool, set()
         self.cand = {}   # (hour, band, gen) -> [cand, acc]
         self.lines = self.bad = self.skipped = 0
+        self.stream, self.fix, self.off = None, True, 0.0
+
+    def set_stream(self, name):
+        """The archive is one stream (a receiver run spans its daily files); each extra file is its
+        own. Dropped-sample correction state carries over between runs of the rollup in meta."""
+        if self.stream == name:
+            return
+        self.save_stream()
+        self.stream = name
+        v = self.con.execute("SELECT value FROM meta WHERE key=?", ("drops:" + name,)).fetchone()
+        st = json.loads(v[0]) if v else {"fix": True, "off": 0.0}
+        self.fix, self.off = st["fix"], st["off"]
+
+    def save_stream(self):
+        if self.stream is not None:
+            self.con.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                             ("drops:" + self.stream, json.dumps({"fix": self.fix, "off": self.off})))
+
+    def epoch(self, utc):
+        t = epoch(utc)
+        return None if t is None else t + self.off
 
     def count(self, t, band, gen, acc, cand=1):
         a = self.cand.setdefault((int(t) // 3600 * 3600, band or "?", gen), [0, 0])
@@ -251,7 +285,11 @@ class Ingest:
 
     def record(self, r):
         kind = r.get("kind")
-        t = epoch(r.get("utc"))
+        if kind == "start":
+            self.fix, self.off = bool(r.get("utc_dropfix")), 0.0
+        elif kind == "stat" and not self.fix:
+            self.off = float(r.get("dropped_s") or 0.0)
+        t = self.epoch(r.get("utc"))
         if t is None:
             self.skipped += 1
             return
@@ -296,7 +334,7 @@ class Ingest:
         else:
             members, via = r.get("members") or [], "repeat"
         for m in members:
-            tm = epoch(m.get("utc")) or t
+            tm = self.epoch(m.get("utc")) or t
             self.burst(tm, m.get("band"), hexs, m.get("ebn0"), m.get("ebn0"), str(round(m.get("f_hz", 0) / 100)),
                        0, 1, 0, 0, m.get("f_hz"), None, via)
 
@@ -362,9 +400,14 @@ def ingest_file(con, path, ing, verbose):
         offset = 0   # replaced or truncated: read it again
     if offset >= size:
         return 0
-    with open(path, "rb") as f:
-        f.seek(offset)
-        buf = f.read()
+    if path.endswith(".gz"):        # a compressed archive day (only read whole, by a rebuild)
+        with gzip.open(path, "rb") as f:
+            buf = f.read()
+        offset, size = 0, len(buf)
+    else:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            buf = f.read()
     *complete, tail = buf.split(b"\n")
     consumed = len(buf) - len(tail)
     n = 0
@@ -378,6 +421,7 @@ def ingest_file(con, path, ing, verbose):
             ing.bad += 1
     ing.lines += n
     ing.flush()
+    ing.save_stream()
     con.execute("INSERT INTO ingest_state(file,offset,size,updated) VALUES(?,?,?,?) "
                 "ON CONFLICT(file) DO UPDATE SET offset=excluded.offset, size=excluded.size, "
                 "updated=excluded.updated", (path, offset + consumed, size, int(time.time())))
@@ -415,12 +459,21 @@ def main():
     fcntl.flock(lock, fcntl.LOCK_EX)   # one rollup at a time, or two would add the same lines
     con = sqlite3.connect(a.db, timeout=30)
     had = init_db(con)
-    if 0 < had < 2:
+    if 0 < had < SCHEMA_VERSION:
         known = rebuild(con)
-        extra += [f for f in known or [] if f not in extra and os.path.dirname(f) != os.path.abspath(a.archive)]
-        files = sorted(glob.glob(os.path.join(a.archive, "meosar-*.jsonl"))) + extra
+        arch_dir = os.path.abspath(a.archive)
+        gz = [f for f in known or [] if os.path.dirname(f) == arch_dir and f.endswith(".gz")]
+        extra += [f for f in known or [] if f not in extra and os.path.dirname(f) != arch_dir]
+        # archive days in date order, compressed ones among them: a receiver run spans days
+        days = sorted(glob.glob(os.path.join(a.archive, "meosar-*.jsonl")) + gz,
+                      key=lambda f: os.path.basename(f).replace(".gz", ""))
+        files = days + extra
     ing = Ingest(con, tool)
-    total = sum(ingest_file(con, p, ing, a.verbose) for p in files)
+    arch = os.path.abspath(a.archive)
+    total = 0
+    for p in files:
+        ing.set_stream("archive" if os.path.dirname(os.path.abspath(p)) == arch else p)
+        total += ingest_file(con, p, ing, a.verbose)
     try:
         where = tuple(float(x) for x in a.where.split(",")) if a.where else None
     except ValueError:

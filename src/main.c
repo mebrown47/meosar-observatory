@@ -62,9 +62,12 @@ static void usage(void) {
 	        "                   the progress line on stderr then follows them instead of every block\n");
 }
 
-// "utc" field for a time t (s) into the input, when the input has a start time.
+// "utc" field for a time t (s) into the input, when the input has a start time. Samples a live
+// input dropped before t count too: t runs on samples received, and UTC must not fall behind.
+static double utc_fs;   // input sample rate, for the dropped samples
 static void jb_utc(jbuf_t *b, double start_ms, double t) {
 	if (start_ms <= 0) return;
+	if (utc_fs > 0) t += (double)input_dropped_before((long long)(t * utc_fs)) / utc_fs;
 	double ms = start_ms + t * 1000;
 	time_t sec = (time_t)(ms / 1000);
 	struct tm tm;
@@ -82,6 +85,9 @@ static void emit_stat(const char *what, double start_ms, double t, const char *s
 	jb_printf(&b, "{\"kind\": \"%s\", \"t\": %.1f", what, t);
 	jb_utc(&b, start_ms, t);
 	if (src) { jb_raw(&b, ", \"src\": "); jb_str(&b, src); }
+	// Records' UTC counts dropped samples (builds before this marker let UTC fall behind by the
+	// samples dropped since start; the rollup corrects those from the status records).
+	if (!strcmp(what, "start")) jb_raw(&b, ", \"utc_dropfix\": true");
 	jb_printf(&b, ", \"cand\": %lld, \"acc\": %lld, \"sgb\": %lld, \"dropped_s\": %.2f, \"cpu\": %.2f}",
 	          cand, acc, sgb, dropped / fs, cpu_per_s);
 	out_emit(b.s);
@@ -119,15 +125,7 @@ static void emit(const fgb_rec_t *r, const fgb_rec_t *all, double t0_ms, int wit
 	jb_str(&b, r->frame.reasons);
 	jb_printf(&b, ", \"pdf2\": \"%s\"", r->frame.pdf2 == 1 ? "ok" : r->frame.pdf2 == 2 ? "doubtful" : "none");
 	jb_printf(&b, ", \"accept\": \"%s\"", tier(r->accept));
-	if (t0_ms > 0) {
-		double ms = t0_ms + r->t_cw * 1000;
-		time_t s = (time_t)(ms / 1000);
-		struct tm tm;
-		gmtime_r(&s, &tm);
-		char ts[40];
-		strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tm);
-		jb_printf(&b, ", \"utc\": \"%s.%03d+00:00\"", ts, (int)fmod(ms, 1000));
-	}
+	jb_utc(&b, t0_ms, r->t_cw);
 	if (with_llr && !r->combined) {
 		jb_raw(&b, ", \"llr\": [");
 		for (int i = 0; i < FGB_BITS; i++) jb_printf(&b, "%s%.1f", i ? ", " : "", r->llr[i]);
@@ -234,15 +232,7 @@ static void emit_sgb(const sgb_rec_t *r, double t0_ms) {
 	else jb_raw(&b, "fail");
 	jb_printf(&b, "\", \"hex\": \"%s\", \"accept\": \"%s\", \"reasons\": ", hex, tier(r->accept));
 	jb_str(&b, r->reasons);
-	if (t0_ms > 0) {
-		double ms = t0_ms + r->t * 1000;
-		time_t sec = (time_t)(ms / 1000);
-		struct tm tm;
-		gmtime_r(&sec, &tm);
-		char ts[40];
-		strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tm);
-		jb_printf(&b, ", \"utc\": \"%s.%03d+00:00\"", ts, (int)fmod(ms, 1000));
-	}
+	jb_utc(&b, t0_ms, r->t);
 	jb_raw(&b, "}");
 	out_emit(b.s);
 	jb_free(&b);
@@ -301,6 +291,7 @@ int main(int argc, char **argv) {
 	if (!in->rate) in->rate = rate;
 	if (!in->center_hz) in->center_hz = center;
 	double fs = in->rate, fc = in->center_hz, f1 = fs / D1;
+	utc_fs = fs;
 	out_init(!quiet);
 	signal(SIGINT, on_sig);
 	signal(SIGTERM, on_sig);

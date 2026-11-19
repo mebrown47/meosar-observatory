@@ -36,5 +36,9 @@ input_t *input_open_live(const char *spec, const live_opts_t *opts);
 int input_is_live(const char *spec);
 // Live inputs count samples lost to overruns here.
 extern volatile long long input_dropped;
+// Samples dropped before input sample index idx (samples as read, from the input's start): what
+// to add to idx for the time it was received. Records' UTC uses it; times within a burst do not
+// need it. Thread-safe.
+long long input_dropped_before(long long idx);
 
 #endif

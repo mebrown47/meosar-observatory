@@ -27,6 +27,31 @@
 
 volatile long long input_dropped;
 
+// Where in the stream samples were dropped: gap k sits after input sample drop_at[k] (counting
+// samples that reached the reader) and brings the total dropped to drop_cum[k].
+#define DROP_LOG 4096
+static long long drop_at[DROP_LOG], drop_cum[DROP_LOG];
+static int ndrop;
+static long long accepted;      // samples written to the ring so far
+static pthread_mutex_t drop_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void note_drop(long long at, long long n) {
+	pthread_mutex_lock(&drop_mu);
+	input_dropped += n;
+	if (ndrop > 0 && drop_at[ndrop - 1] == at) drop_cum[ndrop - 1] = input_dropped;
+	else if (ndrop < DROP_LOG) { drop_at[ndrop] = at; drop_cum[ndrop] = input_dropped; ndrop++; }
+	else drop_cum[ndrop - 1] = input_dropped;   // log full: later gaps merge into the last one
+	pthread_mutex_unlock(&drop_mu);
+}
+
+long long input_dropped_before(long long idx) {
+	pthread_mutex_lock(&drop_mu);
+	long long d = 0;
+	for (int k = 0; k < ndrop && drop_at[k] <= idx; k++) d = drop_cum[k];
+	pthread_mutex_unlock(&drop_mu);
+	return d;
+}
+
 // ---- Ring buffer of float I/Q frames ----
 
 typedef struct {
@@ -44,7 +69,8 @@ static void ring_init(ring_t *r, int frames) {
 static void ring_write(ring_t *r, const float *src, int n) {
 	pthread_mutex_lock(&r->lock);
 	int room = r->cap - r->len;
-	if (n > room) { input_dropped += n - room; n = room; }
+	if (n > room) { note_drop(accepted + room, n - room); n = room; }
+	accepted += n;
 	for (int i = 0; i < n; i++) {
 		int at = (r->head + r->len + i) % r->cap;
 		r->buf[2 * at] = src[2 * i]; r->buf[2 * at + 1] = src[2 * i + 1];
@@ -134,7 +160,7 @@ static void list_rates(const double *r, int n) {
 #ifdef HAVE_AIRSPY
 static int airspy_cb(airspy_transfer_t *t) {
 	live_t *l = t->ctx;
-	if (t->dropped_samples) input_dropped += (long long)t->dropped_samples;
+	if (t->dropped_samples) note_drop(accepted, (long long)t->dropped_samples);   // (ring_write's thread)
 	ring_write(&l->ring, t->samples, t->sample_count);
 	return 0;
 }
