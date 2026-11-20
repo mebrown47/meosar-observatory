@@ -33,6 +33,7 @@ import collections
 import itertools
 import json
 import math
+import os
 import re
 from datetime import datetime
 
@@ -109,7 +110,8 @@ def main():
     ap.add_argument("records")
     ap.add_argument("frame_pos")
     ap.add_argument("tles", nargs="+")
-    ap.add_argument("--sar", default="/home/mike/dec406/tools/meosar_visible.py")
+    ap.add_argument("--sar", default=os.path.expanduser("~/dec406/tools/meosar_visible.py"),
+                    help="dec406's tools/meosar_visible.py (SAR satellite list)")
     ap.add_argument("--lat", type=float, required=True, help="station latitude (deg)")
     ap.add_argument("--lon", type=float, required=True, help="station longitude (deg)")
     ap.add_argument("--alt", type=float, default=100, help="station altitude (m)")
