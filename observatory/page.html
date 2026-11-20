@@ -102,6 +102,13 @@ const f1 = x => x == null ? "—" : Number(x).toFixed(1);
 const TYPE = {orbitography: "acc", test: "warn", ELT: "bad", EPIRB: "bad", PLB: "bad", SSAS: "bad", RLS: "bad"};
 const pill = t => `<span class="pill ${TYPE[t] || "dim"}">${esc(t || "other")}</span>`;
 const pos = b => b.lat == null ? "" : `<a href="https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=9/${b.lat}/${b.lon}" target="_blank" rel="noopener">${b.lat.toFixed(3)}, ${b.lon.toFixed(3)}</a>`;
+// A position estimated from the relayed copies (geoloc.py), where the frames carry none.
+const kmFmt = r => r >= 10 ? Math.round(r) : r.toFixed(1);
+const estTitle = e => `Estimated from the Doppler shift and delay of the relayed copies: ${e.fit} of ${e.bursts} bursts fit, over ${e.span_h} h. ` +
+  `95% within ${kmFmt(e.r95)} km.` + (e.quality === "rough" ? " Rough: many bursts disagree (the beacon may have moved)." : "");
+const estPos = e => !e ? "" : `<span title="${esc(estTitle(e))}">≈ <a href="https://www.openstreetmap.org/?mlat=${e.lat}&mlon=${e.lon}#map=${e.r95 > 20 ? 8 : 10}/${e.lat}/${e.lon}" target="_blank" rel="noopener">${e.lat.toFixed(2)}, ${e.lon.toFixed(2)}</a> <span class="dim">±${kmFmt(e.r95)} km${e.quality === "rough" ? " · rough" : ""}</span></span>`;
+const coarse = (lat, lon) => Math.abs(lat * 4 - Math.round(lat * 4)) < 1e-4 && Math.abs(lon * 4 - Math.round(lon * 4)) < 1e-4;
+const posOrEst = b => b.lat != null ? pos(b) : estPos(b.est);
 const country = b => `${esc(b.country_name || "")} <span class="dim">${b.country ?? ""}</span>`;
 let S = null, sel = null, typeOn = new Set(), sortK = "last", sortDir = -1;
 try { const h = localStorage.getItem("meosar.hours"); if (h !== null) $("hours").value = h; } catch (e) {}
@@ -202,7 +209,7 @@ function beacons() {
   const th = (k, l, r) => `<th data-k="${k}" class="${r ? "r" : ""}">${l}${sortK === k ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
   $("beacons").innerHTML = `<table><tr>${th("id", "Beacon ID")}${th("btype", "Type")}${th("ident", "Identification")}${th("country_name", "Country")}${th("lat", "Position")}${th("bursts", "Bursts")}${th("ebn0", "Best Eb/N0", 1)}${th("relays", "Sats", 1)}${th("last", "Last heard")}</tr>` +
     B.slice(0, 1000).map(b => `<tr class="click ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${pill(b.btype)}${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td>` +
-      `<td>${esc(b.ident || b.protocol || "")}</td><td>${country(b)}</td><td>${pos(b)}</td>` +
+      `<td>${esc(b.ident || b.protocol || "")}</td><td>${country(b)}</td><td>${posOrEst(b)}</td>` +
       `<td><span class="bar" style="width:${Math.max(3, b.bursts / maxb * 100)}px"></span> <span class="dim">${b.bursts}</span></td>` +
       `<td class="r">${f1(b.ebn0)} dB</td><td class="r">${b.relays}</td><td class="dim">${ts(b.last)}</td></tr>`).join("") + "</table>";
   $("beacons").querySelectorAll("th[data-k]").forEach(h => h.onclick = () => { const k = h.dataset.k; sortDir = sortK === k ? -sortDir : -1; sortK = k; beacons(); });
@@ -215,7 +222,7 @@ function sgb() {
   if (!B.length) { $("sgb").innerHTML = `<p class="dim">None in this window.</p>`; return; }
   $("sgb").innerHTML = `<table><tr><th>Beacon</th><th>Type</th><th>Country</th><th class="r">TAC</th><th class="r">Serial</th><th>Position</th><th class="r">Bursts</th><th class="r">Best Eb/N0</th><th class="r">Sats</th><th>Last heard</th></tr>` +
     B.map(b => `<tr class="click ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${b.test ? pill("test") : `<span class="pill sgb">${esc(b.btype || "SGB")}</span>`}</td>` +
-      `<td>${country(b)}</td><td class="r">${b.tac}</td><td class="r">${b.serial}</td><td>${pos(b)}</td><td class="r">${b.bursts}</td>` +
+      `<td>${country(b)}</td><td class="r">${b.tac}</td><td class="r">${b.serial}</td><td>${posOrEst(b)}</td><td class="r">${b.bursts}</td>` +
       `<td class="r">${f1(b.ebn0)} dB</td><td class="r">${b.relays}</td><td class="dim">${ts(b.last)}</td></tr>`).join("") + "</table>";
   $("sgb").querySelectorAll("tr.click").forEach(r => r.onclick = () => detail(r.dataset.id));
 }
@@ -229,6 +236,11 @@ async function detail(id) {
   h += `<div class="dim">Latest frame <span class="mono">${esc(L.hex || "")}</span></div>` +
     (L.fields && L.fields.length ? `<div class="mono fields">${L.fields.map(esc).join("\n")}</div>` : `<div>${esc(L.protocol || "")}</div>`) +
     (L.lat != null ? `<div style="margin:4px 0 8px">${pos(L)} · <a href="globe?beacon=${encodeURIComponent(id)}">on the globe, with the satellites that relayed it</a></div>` : "");
+  const E = d.est;
+  if (E) h += `<div style="margin:4px 0 8px">Estimated from the relays: ${estPos(E)} <span class="dim">· ${E.fit} of ${E.bursts} bursts fit, ` +
+    `${ts(E.t_first)} to ${ts(E.t_last)} UTC` + (E.truth_km != null ? ` · ${kmFmt(E.truth_km)} km from the position in its frames` +
+      (L.lat != null && coarse(L.lat, L.lon) ? " (a coarse one, to 0.5°)" : "") : "") + `</span>` +
+    (L.lat == null ? ` · <a href="globe?beacon=${encodeURIComponent(id)}">on the globe</a>` : "") + `</div>`;
   const anyPos = d.bursts.some(b => b.lat != null);
   h += `<table style="margin-top:8px"><tr><th>Time (UTC)</th><th>Band</th><th class="r">Carrier</th><th class="r">Eb/N0</th><th class="r">Sats</th>${anyPos ? "<th>Relayed by</th><th>Position</th>" : ""}<th>Decode</th></tr>` +
     d.bursts.slice(0, 300).map(b => `<tr><td class="dim">${ts(b.t)}</td><td>${esc(b.band)}</td><td class="r mono">${b.f_hz ? (b.f_hz / 1e6).toFixed(4) : ""}</td><td class="r">${f1(b.ebn0)}</td>` +

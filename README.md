@@ -41,8 +41,9 @@ per UTC day, and `--stats 600` adds a status record every 10 minutes.
 
 This installs the receiver (`meosar-rx.service`, daily archive in `/var/lib/meosar-rx/archive`),
 the MEOSAR Observatory dashboard on :8896 (`meosar-observatory`), a rollup that folds the archive
-into `/var/lib/meosar-rx/observatory.db` every minute (`meosar-rollup.timer`) and a daily timer
-that compresses and expires the raw archive. Settings are in `/etc/meosar-rx.conf`.
+into `/var/lib/meosar-rx/observatory.db` every minute (`meosar-rollup.timer`), an hourly job that
+estimates beacon positions (`meosar-geoloc.timer`, idle priority) and a daily timer that compresses
+and expires the raw archive. Settings are in `/etc/meosar-rx.conf`.
 
 ## MEOSAR Observatory
 
@@ -66,6 +67,18 @@ station's position to ~1 km in `STATION_POS`; a wrong position shows as bursts t
 assignment (`proto/stationfit.py` finds the position from the bursts themselves). TLEs are fetched
 once a day into `/var/lib/meosar-rx/tle/`, the only internet access the observatory makes; offline,
 attribution waits for TLEs at most 30 days from each burst.
+
+Estimated positions (`observatory/geoloc.py`): the same relay geometry run the other way. A beacon's
+copies only agree on one frequency and transmit time at the beacon's true position, so a search over
+trial positions, scored over its multi-copy bursts from the last 72 hours as the satellites move,
+finds where it is, whether or not its frames say. Checked against beacons that report their
+precise position: second generation within ~2 km, first generation within 3-13 km (the stated 95%
+radius is never smaller than 3 and 15 km). Many first-generation frames carry only a coarse
+position (0.5 degrees, about 50 km), where the estimate is the better of the two. A beacon needs 10 multi-copy bursts over an hour at least; moving
+beacons fit nowhere and get no estimate. The dashboard and the globe show an estimate (marked ≈,
+circled at 95% on the globe) for beacons whose frames carry no position, and for the others how far
+it is from their own position. One beacon takes 5-80 s of CPU; the hourly job runs at idle priority
+and re-estimates beacons still heard every 6 hours.
 
 `/globe` lists the beacons on the left and maps their positions on a 3D globe on the right: colour
 by beacon type, first generation round and second generation diamond, tracks joining a beacon's

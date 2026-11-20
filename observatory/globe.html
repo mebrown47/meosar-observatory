@@ -143,6 +143,19 @@ function tracksOf(b) {
   if (cur.length > 1) out.push(cur);
   return out;
 }
+// A circle of r km around a point, for an estimated position's 95% region.
+function ring(lat, lon, r, n = 72) {
+  const d = r / 6371, p1 = lat * Math.PI / 180, l1 = lon * Math.PI / 180, out = [];
+  for (let i = 0; i <= n; i++) {
+    const th = 2 * Math.PI * i / n;
+    const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(th));
+    const l2 = l1 + Math.atan2(Math.sin(th) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+    out.push({lat: p2 * 180 / Math.PI, lon: ((l2 * 180 / Math.PI + 540) % 360) - 180});
+  }
+  return out;
+}
+const coarse = (lat, lon) => Math.abs(lat * 4 - Math.round(lat * 4)) < 1e-4 && Math.abs(lon * 4 - Math.round(lon * 4)) < 1e-4;
+const kmFmt = r => r >= 10 ? Math.round(r) : r.toFixed(1);
 const nameOf = b => b.gen === 2 ? `TAC ${b.tac} #${b.serial}` : b.id;
 
 let D = null, selected = null, fitted = false;
@@ -191,6 +204,8 @@ async function load() {
     if (D.empty) { $("status").textContent = "no data yet"; D.items = []; }
     else $("status").textContent = `newest ${new Date(D.newest * 1000).toISOString().slice(11, 16)} UTC`;
   } catch (e) { $("status").textContent = "cannot reach the station"; return; }
+  // Beacons whose frames carry no position go where the relays put them (geoloc.py), marked.
+  for (const b of D.items) if (b.lat == null && b.est) { b.lat = b.est.lat; b.lon = b.est.lon; b.estimated = true; }
   if (selected && !D.items.some(b => b.id === selected)) selected = null;
   draw();
   if (!fitted && (D.items.some(b => b.lat != null) || D.station)) {
@@ -210,7 +225,8 @@ function draw() {
     `<button type="button" class="chip" data-t="${esc(t)}" aria-pressed="${!typeOff.has(t)}"><i style="background:${COLORS[t] || COLORS.other}"></i>${esc(t)} ${c}</button>`).join("");
   $("types").querySelectorAll(".chip").forEach(c => c.onclick = () => { const t = c.dataset.t; typeOff.has(t) ? typeOff.delete(t) : typeOff.add(t); save(); draw(); });
   const withPos = D.items.filter(b => b.lat != null).length;
-  $("counts").innerHTML = `<b>${D.items.length}</b> beacons · <b>${withPos}</b> with a position · ${D.items.filter(b => b.gen === 2).length} second generation`;
+  const nEst = D.items.filter(b => b.estimated).length;
+  $("counts").innerHTML = `<b>${D.items.length}</b> beacons · <b>${withPos}</b> with a position${nEst ? ` (${nEst} estimated)` : ""} · ${D.items.filter(b => b.gen === 2).length} second generation`;
   // Globe.
   const shown = mapped(), items = shown.map(b => ({id: b.id, lat: b.lat, lon: b.lon, color: colorOf(b), size: b.id === selected ? 12 : 9,
     shape: b.gen === 2 ? SHAPE.diamond : SHAPE.circle, data: b}));
@@ -227,9 +243,14 @@ function draw() {
   if (D.station) items.push({id: "station", lat: D.station.lat, lon: D.station.lon, color: "#ffd08a", size: 11, shape: SHAPE.square, data: null});
   globe.setItems(items);
   globe.select(selected);
-  globe.setTracks(opts.tracks ? shown.filter(b => b.track.length > 1).flatMap(b => tracksOf(b).map(points => ({color: b.id === selected ? "#ffffff" : colorOf(b), points}))) : []);
+  const tracks = opts.tracks ? shown.filter(b => b.track.length > 1).flatMap(b => tracksOf(b).map(points => ({color: b.id === selected ? "#ffffff" : colorOf(b), points}))) : [];
+  // Estimated positions: their 95% circle (the selected beacon's too when its frames carry a position).
+  for (const b of shown) if (b.est && (b.estimated || b.id === selected))
+    tracks.push({color: b.id === selected ? "#ffffff" : colorOf(b), points: ring(b.est.lat, b.est.lon, b.est.r95)});
+  globe.setTracks(tracks);
   $("legend").innerHTML = "<span>" + (D.station ? `<span><i style="display:inline-block;width:9px;height:9px;background:#ffd08a;margin-right:5px"></i>${esc(STATION || "station")}</span> · ` : "") +
     "● first generation · ◆ second generation · lines join a beacon's positions" +
+    (nEst ? " · ≈ a position estimated from the relays, circled at 95%" : "") +
     (satList().length ? ` · <span style="color:${SAT_COLOR}">■</span> SAR satellites in view now · a selected beacon's latest burst links it to the <span style="color:${RELAY_COLOR}">■</span> satellites that relayed it` : "") + "</span>";
   $("empty").hidden = !!shown.length;
   if (!shown.length) $("empty").textContent = D.items.length ? "No beacon in this window and selection reports a position." : "No beacons in this window yet.";
@@ -247,7 +268,7 @@ function list() {
     li.className = b.lat == null ? "nopos" : "";
     li.setAttribute("aria-selected", String(b.id === selected));
     li.innerHTML = `<i class="${b.gen === 2 ? "d" : ""}" style="background:${colorOf(b)}"></i>` +
-      `<span class="who"><b>${esc(nameOf(b))}</b> ${esc(b.country_name || "")}<small>${esc(b.btype || "")} · ${esc(b.ident || "")}${b.lat == null ? " · no position" : ""}</small></span>` +
+      `<span class="who"><b>${esc(nameOf(b))}</b> ${esc(b.country_name || "")}<small>${esc(b.btype || "")} · ${esc(b.ident || "")}${b.lat == null ? " · no position" : b.estimated ? " · ≈ estimated position" : ""}</small></span>` +
       `<span class="age">${age(b.last)}<br>${b.bursts}×</span>`;
     li.onclick = () => select(b.id, true);
     return li;
@@ -291,8 +312,12 @@ function detail() {
   const rel = b.relay ? b.relay.sats.map(r => `${r.sat} (${r.el.toFixed(0)}°)`).join(", ") + ` · ${ts(b.relay.t)}` : "";
   const rows = [
     ["Type", `${b.btype || ""}${b.selftest ? " (self-test)" : ""}`], ["Identification", b.ident], ["Country", `${b.country_name || ""} ${b.country ?? ""}`],
-    ["Position", b.lat != null ? `<a href="https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=9/${b.lat}/${b.lon}" target="_blank" rel="noopener">${fmtPos(b.lat, b.lon)}</a>` +
-      (b.track.length > 1 ? ` · ${b.track.length} positions` : "") : "none in its frames"],
+    ["Position", b.lat != null ? (b.estimated ? "≈ " : "") + `<a href="https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=9/${b.lat}/${b.lon}" target="_blank" rel="noopener">${fmtPos(b.lat, b.lon)}</a>` +
+      (b.estimated ? ` ±${kmFmt(b.est.r95)} km` : "") + (b.track.length > 1 ? ` · ${b.track.length} positions` : "") : "none in its frames"],
+    ...(b.est ? [["Estimated", (b.estimated ? "" : `${fmtPos(b.est.lat, b.est.lon)} ±${kmFmt(b.est.r95)} km · `) +
+      `from the relays: ${b.est.fit} of ${b.est.bursts} bursts fit over ${b.est.span_h} h${b.est.quality === "rough" ? " · rough, many bursts disagree" : ""}` +
+      (b.est.truth_km != null ? ` · ${kmFmt(b.est.truth_km)} km from its own position` +
+        (!b.estimated && coarse(b.lat, b.lon) ? " (a coarse one, to 0.5°)" : "") : "")]] : []),
     ["Bursts", `${b.bursts} in this window · best Eb/N0 ${f1(b.ebn0)} dB · up to ${b.relays} satellites`],
     ["First heard", ts(b.first)], ["Last heard", `${ts(b.last)} (${age(b.last)} ago)`],
     ...(rel ? [["Relayed by", rel]] : []),
@@ -323,12 +348,12 @@ function labels() {
   };
   const shown = mapped();
   if (opts.labels && (shown.length <= 40 || globe.view.dist < 1.9))
-    for (const b of shown) { if (n >= 120) break; if (b.id !== selected) put(b.lat, b.lon, b.gen === 2 ? nameOf(b) : (b.ident || b.id).slice(0, 28), ""); }
+    for (const b of shown) { if (n >= 120) break; if (b.id !== selected) put(b.lat, b.lon, (b.estimated ? "≈ " : "") + (b.gen === 2 ? nameOf(b) : (b.ident || b.id).slice(0, 28)), ""); }
   if (opts.labels) for (const x of satsUp()) put(x.now.lat, x.now.lon, x.sat, "sat");
   if (D.station) put(D.station.lat, D.station.lon, STATION || "station", "st");
   const s = selected && shown.find(b => b.id === selected);
   if (s && s.relay) for (const r of s.relay.sats) put(r.lat, r.lon, r.sat, "rel");
-  if (s) put(s.lat, s.lon, s.gen === 2 ? nameOf(s) : (s.ident || s.id), "sel");
+  if (s) put(s.lat, s.lon, (s.estimated ? "≈ " : "") + (s.gen === 2 ? nameOf(s) : (s.ident || s.id)), "sel");
   for (let i = n; i < pool.length; i++) pool[i].hidden = true;
 }
 

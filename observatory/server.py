@@ -12,6 +12,7 @@ Stdlib only, no external assets. Follows inmarsat-rx's observatory server.
   GET /api/overview     -> the dashboard's data (?hours=N, 0 = everything)
   GET /api/map          -> the globe's data (?hours=N)
   GET /api/beacon?id=B  -> one beacon: decoded fields and its bursts, with the satellites that relayed each
+                           (and, as everywhere, its position estimated from the relays: geoloc.py)
   GET /static/...       -> the globe's script and its vendored assets (three.js, Earth texture, coastlines)
   GET /healthz          -> ok
 
@@ -56,6 +57,20 @@ def frame_info(con, hexs):
 
 def has_attr(con):
     return con.execute("SELECT 1 FROM sqlite_master WHERE name='attr'").fetchone() is not None
+
+
+def estimates(con, bid=None):
+    """Positions estimated from the relays (geoloc.py), {bid: {...}}: the ones with a position."""
+    if con.execute("SELECT 1 FROM sqlite_master WHERE name='geoloc'").fetchone() is None:
+        return {}
+    q = ("SELECT bid, quality, lat, lon, r95, bursts, fit, span_h, t_first, t_last, truth_km, computed FROM geoloc "
+         "WHERE quality IN ('good', 'rough')" + (" AND bid=?" if bid else ""))
+    out = {}
+    for r in con.execute(q, (bid,) if bid else ()):
+        out[r[0]] = {"quality": r[1], "lat": round(r[2], 4), "lon": round(r[3], 4), "r95": round(r[4], 1), "bursts": r[5],
+                     "fit": r[6], "span_h": round(r[7], 1), "t_first": r[8], "t_last": r[9],
+                     "truth_km": None if r[10] is None else round(r[10], 1), "computed": r[11]}
+    return out
 
 
 def build_sats(con, t0):
@@ -129,6 +144,9 @@ def build_overview(db, hours):
             fi = frame_info(con, hexs)
             beacons.append({"id": bid, "hex": hexs, "bursts": n, "ebn0": eb, "relays": rel, "first": first,
                             "last": last, "selftest": st > 0.8 * n, "combined_only": co, **fi})
+        est = estimates(con)
+        for b in beacons:
+            b["est"] = est.get(b["id"])
         beacons.sort(key=lambda b: -b["last"])
         ok_ids = {b["id"] for b in beacons}
 
@@ -143,7 +161,7 @@ def build_overview(db, hours):
             fi = frame_info(con, hexs)
             sgb.append({"id": bid, "hex": hexs, "bursts": n, "ebn0": eb, "relays": rel, "first": first, "last": last,
                         "test": bool(test), "combined_only": co, "tac": tac, "serial": serial, **fi,
-                        "country": country})
+                        "country": country, "est": est.get(bid)})
         sgb.sort(key=lambda b: -b["last"])
 
         # Activity: confirmed-beacon bursts and SGB bursts per bin.
@@ -227,7 +245,7 @@ def build_beacon(db, bid):
         # beacon's time) changes its frame, and the bursts carry each frame's position.
         nframes = len({b["hex"] for b in bursts})
         return {"id": bid, "bursts": bursts, "latest": {"hex": bursts[0]["hex"], **frame_info(con, bursts[0]["hex"])},
-                "frames": nframes}
+                "frames": nframes, "est": estimates(con, bid).get(bid)}
     finally:
         con.close()
 
@@ -276,7 +294,7 @@ def build_map(db, hours, where):
                           "fields": b.get("fields", []), "hex": b.get("hex"),
                           "tac": b.get("tac"), "serial": b.get("serial"),
                           "lat": tr[-1][1] if tr else None, "lon": tr[-1][2] if tr else None,
-                          "track": tr[-500:], "relay": relay.get(b["id"])})
+                          "track": tr[-500:], "relay": relay.get(b["id"]), "est": b.get("est")})
     items.sort(key=lambda b: -b["last"])
     return {"generated": ov["generated"], "newest": ov["newest"], "hours": ov["hours"], "items": items,
             "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"], "satellites": sats}
