@@ -82,7 +82,7 @@ The installer finds `~/dec406/build/dec406_hex` on its own.
 ## Install as a station (systemd)
 
 ```bash
-git clone <this repository> meosar-rx && cd meosar-rx
+git clone https://github.com/mebrown47/meosar-observatory.git meosar-rx && cd meosar-rx
 ./install.sh            # asks for source, gain, bias-tee, station name and position; --help for the rest
 ./install.sh --update   # git pull, rebuild, test, reinstall, restart
 ```
