@@ -49,7 +49,7 @@ CAP = 60.0          # per-burst chi2 cap
 # minimum could fall between grid points; TIGHT for the refinement, from the scatter of clearly
 # attributed copies (median-based: ~1.3 Hz; ~9 us SGB, ~45 us FGB), with room for the heavy tails
 # (the per-burst cap discards a burst with a bad copy).
-LOOSE = (SA.SIG_F, {1: SA.SIG_T, 2: SA.SIG_T})
+LOOSE = (15.0, {1: 0.15, 2: 0.15})
 TIGHT = (2.5, {1: 0.060, 2: 0.015})
 MIN_EL_BC = 0.0
 
@@ -230,7 +230,7 @@ def locate(prep, station_ll, coarse=2.0):
             c = (LA.ravel()[i], LO.ravel()[i])
             grids.append((span, step, LA.ravel(), LO.ravel(), t2))
         best, fit = t2[i], f2[i]
-        # The noise model (SIG_F, SIG_T) is a guess: scale chi2 by the bursts that fit at the best
+        # The noise model is a guess: scale chi2 by the bursts that fit at the best
         # position (reduced chi2; each burst of n copies has 2(n-1) degrees of freedom).
         xyz, up = ecef_grid(np.array([c[0]]), np.array([c[1]]))
         chis = [(burst_chi(b, xyz, up, model=TIGHT)[0], len(b["f"])) for b in prep]

@@ -13,7 +13,7 @@ translation (Galileo 1138.05 MHz, GLONASS-K 1138.85 MHz), D_dn the Doppler satel
 L band, r the ranges. For a beacon whose frame carries its position, orbits (TLEs, propagated with
 SGP4) give every term but f0 and t_tx; under the right assignment of copies to satellites, every
 copy implies the same f0 and the same t_tx. Each burst's assignments are scored by the spread of
-implied f0 (sigma 15 Hz) and t_tx (sigma 0.15 ms); one is "clear" when it fits (chi2 < 3 per copy)
+implied f0 and t_tx (sigmas from the measured scatter: SIG); one is "clear" when it fits (chi2 < 3 per copy)
 and the runner-up is worse by more than 9. The station's position must be right (to ~1 km):
 proto/satid.py and proto/stationfit.py are the offline versions, and found that no per-satellite
 offsets are needed. The implied f0's common offset from nominal is the receiver's reference error.
@@ -54,7 +54,18 @@ OMEGA = 7.292115e-5                     # Earth's rotation, rad/s
 T_XLATE = {"galileo": 1138.05e6, "glonass": 1138.85e6 + 4.0}
 F_NOM = {1: 406.04e6, 2: 406.05e6}      # for the uplink Doppler's scale
 GROUPS = {"galileo": "galileo", "glonass": "glo-ops"}   # band -> CelesTrak group (= file name)
-SIG_F, SIG_T = 15.0, 0.15               # Hz, ms
+# Noise model by generation: (sigma of a copy's implied f0 in Hz, of its implied t_tx in ms), from
+# the measured robust scatter of clearly attributed copies (FGB 1.3 Hz, 36 us; SGB 0.7 Hz, 4 us;
+# hardly dependent on Eb/N0), widened for the heavy tails: FGB frequency most (p99 9 Hz), so a
+# two-copy FGB burst whose copies differ by 10 Hz still fits. Against 15 Hz / 0.15 ms for both
+# (the first model), on 3 days of bursts: ambiguous 471 -> 93, clear +237, and no burst clear
+# under both changed satellites.
+SIG = {1: (3.5, 0.070), 2: (1.5, 0.008)}
+# A single copy against the beacon's f0 from bursts within REF_S: its own scatter plus the
+# beacon's frequency wander within the hour (FGB 1.0 Hz, SGB 0.4 Hz; p99 9 and 8 Hz). Candidate
+# satellites usually imply f0s hundreds of Hz apart, so this can afford the tails.
+SIG_REF = {1: 5.0, 2: 3.0}
+MODEL = "2"     # change with the model: every burst is attributed again under the new one
 WIN_HZ = 500.0                          # copies' implied f0 must lie this close to the anchor's
 MIN_EL = 5.0                            # station elevation, deg
 SETTLE_S = 60                           # attribute a burst once every copy of it is in
@@ -273,11 +284,12 @@ def candidates(sats, band, gen, t, beacon, station):
     return out
 
 
-def score(copies, cand, bands=None):
+def score(copies, cand, bands=None, sig=SIG[1]):
     """Best and runner-up assignment of copies [(f_hz, dt_ms)] to distinct candidates:
     (chi, chi_f, chi_t, perm, implied f0s, implied t_tx's). bands: each copy's band (a copy only
-    goes to a satellite of its band); None: all one band. Copy 0's satellite anchors f0; the
-    others only try satellites within WIN_HZ of it."""
+    goes to a satellite of its band); None: all one band. sig: the noise model, (Hz, ms). Copy 0's
+    satellite anchors f0; the others only try satellites within WIN_HZ of it."""
+    sig_f, sig_t = sig
     n, m = len(copies), len(cand)
     ok = [[bands is None or bands[k] == c["band"] for c in cand] for k in range(n)]
     f0 = [[copies[k][0] - c["T"] - c["dop"] for c in cand] for k in range(n)]
@@ -289,8 +301,8 @@ def score(copies, cand, bands=None):
             fs = [f0[i][j] for i, j in enumerate(perm)]
             ts = [tx[i][j] for i, j in enumerate(perm)]
             mf, mt = sum(fs) / n, sum(ts) / n
-            cf = sum((x - mf) ** 2 for x in fs) / SIG_F ** 2
-            ct = sum((x - mt) ** 2 for x in ts) / SIG_T ** 2
+            cf = sum((x - mf) ** 2 for x in fs) / sig_f ** 2
+            ct = sum((x - mt) ** 2 for x in ts) / sig_t ** 2
             top.append((cf + ct, cf, ct, tuple(perm), fs, ts))
             top.sort(key=lambda x: x[0])
             del top[2:]
@@ -359,6 +371,12 @@ def run(con, where, tle_dir, verbose=False):
     if Satrec is None or not where:
         return None
     init_tables(con)
+    if (con.execute("SELECT value FROM meta WHERE key='attr_model'").fetchone() or [None])[0] != MODEL:
+        con.execute("DELETE FROM attr")
+        con.execute("UPDATE copies SET sat=NULL, el=NULL, f_res=NULL, t_res=NULL, slat=NULL, slon=NULL, salt=NULL")
+        con.execute("INSERT INTO meta(key,value) VALUES('attr_model',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (MODEL,))
+        if verbose:
+            print(f"satattr: noise model {MODEL}: attributing every burst again")
     try:
         os.makedirs(tle_dir, exist_ok=True)
         fetch_tles(con, tle_dir, verbose)
@@ -387,7 +405,7 @@ def run(con, where, tle_dir, verbose=False):
                 store(con, gen, burst, bid, t, band, copies, cand, "nosat")
                 counts["nosat"] = counts.get("nosat", 0) + 1
                 continue
-            top = score([(f, dt) for _, f, dt in copies], cand, [x[3] for x in cp])
+            top = score([(f, dt) for _, f, dt in copies], cand, [x[3] for x in cp], SIG[gen])
             if not top:
                 state, best, second = "nofit", None, None
             else:
@@ -411,7 +429,7 @@ def run(con, where, tle_dir, verbose=False):
             continue        # else wait: a later burst may give the reference
         f0 = statistics.median(ref)
         cand = candidates(tles.at(t, band), band, gen, t, ecef(lat, lon), station)
-        fit = sorted(((f - T_XLATE[band] - c["dop"] - f0) ** 2 / SIG_F ** 2, j) for j, c in enumerate(cand))
+        fit = sorted(((f - T_XLATE[band] - c["dop"] - f0) ** 2 / SIG_REF[gen] ** 2, j) for j, c in enumerate(cand))
         if not fit or fit[0][0] > 9:
             state = "nofit" if fit else "nosat"
             store(con, gen, burst, bid, t, band, copies, cand, state)
