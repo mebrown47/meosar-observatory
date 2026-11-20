@@ -177,7 +177,7 @@ cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release > "$BUILD_DIR.l
   && cmake --build "$BUILD_DIR" --clean-first -j"$(nproc)" >> "$BUILD_DIR.log" 2>&1 \
   || { tail -20 "$BUILD_DIR.log"; die "build failed — full log: $BUILD_DIR.log"; }
 BIN="$BUILD_DIR/meosar-rx"
-ok "built $BIN"
+ok "built $BIN ($("$BIN" --version))"
 grep -q 'libAIRSPY found' "$BUILD_DIR.log" || warn "built without libairspy: no Airspy input"
 grep -q 'libHACKRF found' "$BUILD_DIR.log" || warn "built without libhackrf: no HackRF input"
 
@@ -381,11 +381,7 @@ find "$dir" -maxdepth 1 -name 'meosar-*.jsonl' -mtime +0 -exec gzip -9 {} \;
 exit 0
 EOF
 chmod +x "$STAGE/bin/meosar-tidy"
-if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C "$REPO_ROOT" describe --always --dirty --tags > "$STAGE/VERSION"
-else
-  echo "unknown (not a git checkout), built $(date -u +%Y-%m-%dT%H:%MZ)" > "$STAGE/VERSION"
-fi
+"$BIN" --version | sed 's/^meosar-rx //' > "$STAGE/VERSION"
 # Swap the whole tree in by rename, so the services never see half a copy.
 as_root rm -rf "$PREFIX.new" "$PREFIX.old"
 as_root cp -r "$STAGE" "$PREFIX.new"

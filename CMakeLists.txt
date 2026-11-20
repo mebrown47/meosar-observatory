@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(meosar-rx C)
+project(meosar-rx VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 if(NOT CMAKE_BUILD_TYPE)
@@ -25,6 +25,13 @@ target_link_libraries(meosar PUBLIC ${FFTW3F_LIBRARIES} m Threads::Threads)
 
 add_executable(meosar-rx src/main.c src/out.c src/input_file.c src/input_live.c)
 target_link_libraries(meosar-rx meosar Threads::Threads)
+# version.h from git describe, refreshed on every build (cmake/version.cmake)
+add_custom_target(version_h
+	COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/version.h
+	        -DFALLBACK=${PROJECT_VERSION} -P ${CMAKE_SOURCE_DIR}/cmake/version.cmake
+	BYPRODUCTS ${CMAKE_BINARY_DIR}/version.h)
+add_dependencies(meosar-rx version_h)
+target_include_directories(meosar-rx PRIVATE ${CMAKE_BINARY_DIR})
 
 add_executable(test_fgb tests/test_fgb.c)
 target_link_libraries(test_fgb meosar)

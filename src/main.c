@@ -23,6 +23,7 @@
 #include "input.h"
 #include "out.h"
 #include "sgb_rx.h"
+#include "version.h"
 
 #define D1 20
 #define PRE 0.3
@@ -42,6 +43,7 @@ static void on_sig(int s) { (void)s; stop = 1; }
 
 static void usage(void) {
 	fprintf(stderr,
+	        "meosar-rx " MEOSAR_VERSION "\n"
 	        "usage: meosar-rx -i INPUT [options]\n"
 	        "  -i INPUT         recording (.sigmf-meta/.sigmf-data or raw with -F), or airspy[:SERIAL],\n"
 	        "                   hackrf[:SERIAL], rtl_tcp:HOST:PORT, spyserver:HOST:PORT\n"
@@ -59,7 +61,8 @@ static void usage(void) {
 	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n"
 	        "  --archive DIR    also append records to DIR/meosar-YYYY-MM-DD.jsonl (UTC day)\n"
 	        "  --stats S        status records: one at start, one after a minute, then every S seconds;\n"
-	        "                   the progress line on stderr then follows them instead of every block\n");
+	        "                   the progress line on stderr then follows them instead of every block\n"
+	        "  --version        print the version and exit\n");
 }
 
 // "utc" field for a time t (s) into the input, when the input has a start time. Samples a live
@@ -87,7 +90,7 @@ static void emit_stat(const char *what, double start_ms, double t, const char *s
 	if (src) { jb_raw(&b, ", \"src\": "); jb_str(&b, src); }
 	// Records' UTC counts dropped samples (builds before this marker let UTC fall behind by the
 	// samples dropped since start; the rollup corrects those from the status records).
-	if (!strcmp(what, "start")) jb_raw(&b, ", \"utc_dropfix\": true");
+	if (!strcmp(what, "start")) jb_raw(&b, ", \"utc_dropfix\": true, \"version\": \"" MEOSAR_VERSION "\"");
 	jb_printf(&b, ", \"cand\": %lld, \"acc\": %lld, \"sgb\": %lld, \"dropped_s\": %.2f, \"cpu\": %.2f}",
 	          cand, acc, sgb, dropped / fs, cpu_per_s);
 	out_emit(b.s);
@@ -247,9 +250,9 @@ int main(int argc, char **argv) {
 	static struct option lo[] = {
 		{"start", 1, 0, 1}, {"dur", 1, 0, 2}, {"bands", 1, 0, 3}, {"thr", 1, 0, 4}, {"L", 1, 0, 5},
 		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"no-sgb", 0, 0, 8}, {"sgb-threads", 1, 0, 9},
-		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"no-repeat", 0, 0, 15}, {"repeat-window", 1, 0, 16}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"no-repeat", 0, 0, 15}, {"repeat-window", 1, 0, 16}, {"help", 0, 0, 'h'}, {"version", 0, 0, 'V'}, {0, 0, 0, 0}};
 	int o;
-	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qh", lo, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qhV", lo, NULL)) != -1) {
 		switch (o) {
 		case 'i': inspec = optarg; break;
 		case 'F': fmt = optarg; break;
@@ -275,6 +278,7 @@ int main(int argc, char **argv) {
 		case 14: stats_s = atof(optarg); break;
 		case 15: do_repeat = 0; break;
 		case 16: repeat_win = atof(optarg); break;
+		case 'V': printf("meosar-rx %s\n", MEOSAR_VERSION); return 0;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}

@@ -63,7 +63,8 @@ SigMF recording (or a raw file with `-F cu8|cs8|cs16|cf32`), or live: `airspy[:S
 `hackrf[:SERIAL]`, `rtl_tcp:HOST:PORT`, `spyserver:HOST:PORT`. Output is one JSON record per burst
 candidate on stdout (and over UDP with `-u HOST:PORT`). With `--archive DIR` records are also
 appended to one file per UTC day, and `--stats 600` adds a status record every 10 minutes.
-`meosar-rx` with no arguments lists every option.
+`meosar-rx` with no arguments lists every option, and `--version` prints the version (from the
+latest `v*` tag, as `git describe` gives it; the start record carries it too).
 
 ## Beacon fields and positions: dec406 (optional)
 
