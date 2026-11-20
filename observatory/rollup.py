@@ -33,6 +33,8 @@ Follows inmarsat-rx's and vdl2-observatory's rollup.py.
     puts the satellites in the wrong place for attribution. Such runs are corrected here by the
     dropped_s of the latest status record (records in the ten minutes before the status record
     that first reports a drop stay uncorrected). Schema 3 rebuilds once to apply it.
+  * Schema 4 records each copy's band: a first-generation burst's copies are often in both
+    (relayed through Galileo and GLONASS), and attribution fits them together.
 
 Usage:
     rollup.py [--archive DIR] [--db PATH] [--dec406 PATH] [--where LAT,LON] [--tle-dir DIR] [-v] [FILE ...]
@@ -55,7 +57,7 @@ from datetime import datetime
 
 import satattr
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 GROUP_S = 1.5
 
 
@@ -320,8 +322,8 @@ class Ingest:
             # same carrier is in already (the same copy decoded twice).
             have = self.con.execute("SELECT k, f_hz FROM copies WHERE gen=1 AND burst=?", (bid_id,)).fetchall()
             if all(abs(f - f2) > 20 for _, f2 in have):
-                self.con.execute("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0) VALUES(1,?,?,?,?,?)",
-                                 (bid_id, max([k for k, _ in have], default=-1) + 1, tc, f, r.get("ebn0")))
+                self.con.execute("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0,band) VALUES(1,?,?,?,?,?,?)",
+                                 (bid_id, max([k for k, _ in have], default=-1) + 1, tc, f, r.get("ebn0"), r.get("band")))
 
     def repeat(self, r, t):
         """Repeat combining: a weak burst attributed to a known beacon (fgb_match), or a frame decoded
@@ -381,8 +383,8 @@ class Ingest:
              " ".join(f"{e:.1f}" for e in eb), r.get("how", ""), int(any(x.get("alone") for x in rel)),
              int(acc == "single" and "6 errors" not in r.get("how", "")), r.get("f_hz")))
         if cur.rowcount == 1:   # each relay's copy, for satellite attribution
-            self.con.executemany("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0) VALUES(2,?,?,?,?,?)",
-                                 [(cur.lastrowid, k, x["dt_ms"] / 1000, x["f_hz"], x.get("ebn0"))
+            self.con.executemany("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0,band) VALUES(2,?,?,?,?,?,?)",
+                                 [(cur.lastrowid, k, x["dt_ms"] / 1000, x["f_hz"], x.get("ebn0"), r.get("band"))
                                   for k, x in enumerate(rel) if x.get("f_hz") is not None and x.get("dt_ms") is not None])
 
     def flush(self):

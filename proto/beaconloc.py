@@ -53,9 +53,11 @@ def bursts_of(con, bid, max_bursts):
         rows = [rows[i] for i in sorted(set(idx))]
     out = []
     for burst, t, band, lat, lon in rows:
-        cp = con.execute("SELECT f_hz, tc, ebn0 FROM copies WHERE gen=? AND burst=? ORDER BY k", (gen, burst)).fetchall()
+        cp = con.execute("SELECT f_hz, tc, ebn0, band FROM copies WHERE gen=? AND burst=? ORDER BY k", (gen, burst)).fetchall()
         t0 = min(c[1] for c in cp)
+        # a first-generation burst's copies can be in both bands (Galileo and GLONASS relays)
         out.append({"t": t, "band": band, "gen": gen, "f": np.array([c[0] for c in cp]),
+                    "bands": [SA.band_of(c[3], c[0]) for c in cp],
                     "eb": np.array([c[2] if c[2] is not None else -99.0 for c in cp]),
                     "dt": np.array([(c[1] - t0) * 1e3 for c in cp]), "lat": lat, "lon": lon})
     return gen, out
@@ -72,28 +74,50 @@ def ecef_grid(lat, lon):
     return xyz, up
 
 
+def make_perms(copy_bands, sat_bands):
+    """Every assignment of copies to distinct satellites of their own band: (P, n) satellite
+    indices, built band by band (far fewer than all permutations of all satellites)."""
+    n = len(copy_bands)
+    parts = []
+    for band in sorted(set(copy_bands)):
+        ks = [k for k in range(n) if copy_bands[k] == band]
+        ss = [j for j, b in enumerate(sat_bands) if b == band]
+        if len(ss) < len(ks):
+            return None
+        parts.append((ks, list(itertools.permutations(ss, len(ks)))))
+    out = []
+    for combo in itertools.product(*[p[1] for p in parts]):
+        row = [0] * n
+        for (ks, _), sel in zip(parts, combo):
+            for k, j in zip(ks, sel):
+                row[k] = j
+        out.append(row)
+    return np.array(out, dtype=np.int16)
+
+
 def prepare(bursts, tles, station):
-    """Per burst: satellites in view of the station (positions, velocities, downlink terms)."""
+    """Per burst: satellites of its copies' bands in view of the station (positions, velocities,
+    downlink terms, translation)."""
     out = []
     for b in bursts:
-        sats = tles.at(b["t"], b["band"])
         R, V, dn = [], [], []
-        f_dn = SA.T_XLATE[b["band"]] + SA.F_NOM[b["gen"]]
-        for label, name, sat in sats:
-            st = SA.sat_state(sat, b["t"])
-            if st is None:
-                continue
-            r, v = st
-            r_dn, rr_dn, el = SA.look(r, v, station)
-            if el < SA.MIN_EL:
-                continue
-            R.append(r); V.append(v); dn.append((label, -f_dn * rr_dn / C, r_dn / C * 1e3))
-        n = len(b["f"])
-        if len(R) < n:
+        for band in sorted(set(b["bands"])):
+            f_dn = SA.T_XLATE[band] + SA.F_NOM[b["gen"]]
+            for label, name, sat in tles.at(b["t"], band):
+                st = SA.sat_state(sat, b["t"])
+                if st is None:
+                    continue
+                r, v = st
+                r_dn, rr_dn, el = SA.look(r, v, station)
+                if el < SA.MIN_EL:
+                    continue
+                R.append(r); V.append(v); dn.append((label, -f_dn * rr_dn / C, r_dn / C * 1e3, band))
+        perms = make_perms(b["bands"], [d[3] for d in dn])
+        if perms is None or not len(perms):
             continue
-        perms = np.array(list(itertools.permutations(range(len(R)), n)), dtype=np.int16)
         out.append({**b, "R": np.array(R), "V": np.array(V), "labels": [d[0] for d in dn],
-                    "dop_dn": np.array([d[1] for d in dn]), "del_dn": np.array([d[2] for d in dn]), "perms": perms})
+                    "dop_dn": np.array([d[1] for d in dn]), "del_dn": np.array([d[2] for d in dn]),
+                    "T": np.array([SA.T_XLATE[d[3]] for d in dn]), "sat_bands": [d[3] for d in dn], "perms": perms})
     return out
 
 
@@ -106,9 +130,8 @@ def burst_chi(b, xyz, up, want_perm=False, model=LOOSE):
     F = SA.F_NOM[b["gen"]]
     dop = b["dop_dn"][None, :] - F * rr_up / C                        # G,S
     dly = b["del_dn"][None, :] + r_up / C * 1e3
-    T = SA.T_XLATE[b["band"]]
     n = len(b["f"])
-    f0 = b["f"][None, None, :] - T - dop[:, :, None]                   # G,S,n (copy k via sat s)
+    f0 = b["f"][None, None, :] - b["T"][None, :, None] - dop[:, :, None]   # G,S,n (copy k via sat s)
     tx = b["dt"][None, None, :] - dly[:, :, None]
     bad = ~el_ok
     P = b["perms"]
@@ -157,20 +180,22 @@ def strongest(prep, m=3):
             out.append(b)
             continue
         keep = np.sort(np.argsort(-b["eb"])[:m])
-        out.append({**b, "f": b["f"][keep], "dt": b["dt"][keep], "eb": b["eb"][keep],
-                    "perms": np.array(list(itertools.permutations(range(len(b["R"])), m)), dtype=np.int16)})
+        bands = [b["bands"][k] for k in keep]
+        out.append({**b, "f": b["f"][keep], "dt": b["dt"][keep], "eb": b["eb"][keep], "bands": bands,
+                    "perms": make_perms(bands, b["sat_bands"])})
     return out
 
 
 def locate(prep, station_ll, coarse=2.0):
-    # Coarse: everything within 80 deg of the station (a beacon further away shares no MEO
-    # satellite with it above 5 deg).
-    la = np.arange(-80, 80.01, coarse)
+    # Coarse: everything within 150 deg of the station. A MEO satellite (23,200 km up) is above
+    # 5 deg at the station within ~73 deg of the sub-satellite point, and above the horizon at the
+    # beacon within ~77 deg: the two can share one up to ~150 deg apart.
+    la = np.arange(-88, 88.01, coarse)
     lats, lons = [], []
     for x in la:
         w = coarse / max(0.2, math.cos(math.radians(x)))
         for y in np.arange(-180, 180, w):
-            if gc_km(station_ll[0], station_ll[1], x, y) < 80 * 111.2:
+            if gc_km(station_ll[0], station_ll[1], x, y) < 150 * 111.2:
                 lats.append(x); lons.append(y)
     lats, lons = np.array(lats), np.array(lons)
     tot, fit = score(strongest(prep), lats, lons)

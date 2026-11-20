@@ -18,6 +18,10 @@ and the runner-up is worse by more than 9. The station's position must be right 
 proto/satid.py and proto/stationfit.py are the offline versions, and found that no per-satellite
 offsets are needed. The implied f0's common offset from nominal is the receiver's reference error.
 
+A first-generation burst often reaches the station through both constellations: its copies then
+lie in both bands (Galileo 1544.1 MHz, GLONASS 1544.9 MHz) and are scored together, each copy only
+against satellites of its own band and with that band's translation, all sharing one f0 and t_tx.
+
 A burst with a single copy has no spread to score; it is attributed by frequency alone when the
 same beacon's f0 is known from a clearly attributed burst within an hour (beacon oscillators drift
 by a few Hz in that time; candidate satellites' Doppler usually differs by hundreds).
@@ -44,7 +48,10 @@ except ImportError:                     # attribution is optional
 
 C = 299792.458                          # km/s
 OMEGA = 7.292115e-5                     # Earth's rotation, rad/s
-T_XLATE = {"galileo": 1138.05e6, "glonass": 1138.85e6}
+# Translation (uplink 406 MHz -> downlink 1544 MHz). GLONASS-K's is 4 Hz above its nominal 1138.85 MHz
+# relative to Galileo's: copies of one burst relayed through both imply a beacon frequency 3.98 Hz
+# higher through GLONASS (326 bursts, 3 days; +2.0 to +4.8 Hz by satellite).
+T_XLATE = {"galileo": 1138.05e6, "glonass": 1138.85e6 + 4.0}
 F_NOM = {1: 406.04e6, 2: 406.05e6}      # for the uplink Doppler's scale
 GROUPS = {"galileo": "galileo", "glonass": "glo-ops"}   # band -> CelesTrak group (= file name)
 SIG_F, SIG_T = 15.0, 0.15               # Hz, ms
@@ -68,7 +75,7 @@ def init_tables(con):
         CREATE TABLE IF NOT EXISTS copies (
             gen INTEGER, burst INTEGER, k INTEGER, tc REAL, f_hz REAL, ebn0 REAL,
             sat TEXT, el REAL, f_res REAL, t_res REAL, slat REAL, slon REAL, salt REAL,
-            PRIMARY KEY (gen, burst, k));
+            band TEXT, PRIMARY KEY (gen, burst, k));
         -- One row per burst looked at. state: clear, ambiguous (the runner-up fits nearly as well),
         -- nofit, noref (a single copy, and no f0 for the beacon), nosat (too few satellites in view).
         -- f0: the beacon frequency the copies imply (Hz); sats: the satellites, comma-separated.
@@ -84,6 +91,14 @@ def init_tables(con):
             el REAL, az REAL);
         """
     )
+    # Added after schema 2: each copy's band (a first-generation burst's copies can be in both).
+    if "band" not in [c[1] for c in con.execute("PRAGMA table_info(copies)")]:
+        con.execute("ALTER TABLE copies ADD COLUMN band TEXT")
+
+
+def band_of(band, f_hz):
+    """A copy's band: as recorded, or from its carrier (Galileo 1544.1 MHz, GLONASS 1544.9 MHz)."""
+    return band or ("galileo" if f_hz < 1544.5e6 else "glonass")
 
 
 # ---------- geometry ----------
@@ -254,16 +269,18 @@ def candidates(sats, band, gen, t, beacon, station):
         if el_bc < 0:
             continue
         out.append({"label": label, "dop": -f_dn * rr_dn / C - F_NOM[gen] * rr_up / C,
-                    "delay": (r_up + r_dn) / C * 1e3, "el": el_st, "r": r})
+                    "delay": (r_up + r_dn) / C * 1e3, "el": el_st, "r": r, "band": band, "T": T_XLATE[band]})
     return out
 
 
-def score(copies, cand, T):
+def score(copies, cand, bands=None):
     """Best and runner-up assignment of copies [(f_hz, dt_ms)] to distinct candidates:
-    (chi, chi_f, chi_t, perm, implied f0s, implied t_tx's). Copy 0's satellite anchors f0; the
+    (chi, chi_f, chi_t, perm, implied f0s, implied t_tx's). bands: each copy's band (a copy only
+    goes to a satellite of its band); None: all one band. Copy 0's satellite anchors f0; the
     others only try satellites within WIN_HZ of it."""
     n, m = len(copies), len(cand)
-    f0 = [[copies[k][0] - T - c["dop"] for c in cand] for k in range(n)]
+    ok = [[bands is None or bands[k] == c["band"] for c in cand] for k in range(n)]
+    f0 = [[copies[k][0] - c["T"] - c["dop"] for c in cand] for k in range(n)]
     tx = [[copies[k][1] - c["delay"] for c in cand] for k in range(n)]
     top = []
 
@@ -279,13 +296,14 @@ def score(copies, cand, T):
             del top[2:]
             return
         for j in range(m):
-            if j not in perm and abs(f0[k][j] - ref) < WIN_HZ:
+            if ok[k][j] and j not in perm and abs(f0[k][j] - ref) < WIN_HZ:
                 perm.append(j)
                 walk(k + 1, perm, ref)
                 perm.pop()
 
     for j0 in range(m):
-        walk(1, [j0], f0[0][j0])
+        if ok[0][j0]:
+            walk(1, [j0], f0[0][j0])
     return top
 
 
@@ -318,7 +336,7 @@ def store(con, gen, burst, bid, t, band, copies, cand, state, best=None, second=
 
 def pending(con, gen, settle_t):
     """Bursts not yet attributed whose beacon reports a position: [(burst, bid, t, band, lat, lon,
-    [(k, f_hz, tc)])]."""
+    [(k, f_hz, tc, band)])]."""
     table = "fgb_bursts" if gen == 1 else "sgb_bursts"
     rows = con.execute(
         f"SELECT b.id, b.bid, b.t, b.band, f.lat, f.lon FROM {table} b JOIN frames f ON f.hex=b.hex "
@@ -329,7 +347,8 @@ def pending(con, gen, settle_t):
     for bid_, bid, t, band, lat, lon in rows:
         if abs(lat - 1.0) < 1e-6 and abs(lon) < 1e-6:
             continue        # test transmitters' placeholder position (1 N 0 E), not where they are
-        cp = con.execute("SELECT k, f_hz, tc FROM copies WHERE gen=? AND burst=? ORDER BY k", (gen, bid_)).fetchall()
+        cp = [(k, f, tc, band_of(b, f)) for k, f, tc, b in con.execute(
+            "SELECT k, f_hz, tc, band FROM copies WHERE gen=? AND burst=? ORDER BY k", (gen, bid_))]
         out.append((bid_, bid, t, band, lat, lon, cp))
     return out
 
@@ -355,20 +374,20 @@ def run(con, where, tle_dir, verbose=False):
     singles = []
     for gen in (1, 2):
         for burst, bid, t, band, lat, lon, cp in pending(con, gen, newest - SETTLE_S):
-            sats = tles.at(t, band)
-            if not sats or band not in T_XLATE:
+            bands = sorted({c[3] for c in cp})
+            if any(b not in T_XLATE or not tles.at(t, b) for b in bands):
                 continue        # no TLEs near enough in time: left for later
             if len(cp) == 1:
-                singles.append((gen, burst, bid, t, band, lat, lon, cp))
+                singles.append((gen, burst, bid, t, cp[0][3], lat, lon, cp))
                 continue
             t0 = min(c[2] for c in cp)
-            copies = [(k, f, (tc - t0) * 1e3) for k, f, tc in cp]
-            cand = candidates(sats, band, gen, t, ecef(lat, lon), station)
-            if len(cand) < len(copies):
+            copies = [(k, f, (tc - t0) * 1e3) for k, f, tc, _ in cp]
+            cand = [c for b in bands for c in candidates(tles.at(t, b), b, gen, t, ecef(lat, lon), station)]
+            if any(sum(c["band"] == b for c in cand) < sum(x[3] == b for x in cp) for b in bands):
                 store(con, gen, burst, bid, t, band, copies, cand, "nosat")
                 counts["nosat"] = counts.get("nosat", 0) + 1
                 continue
-            top = score([(f, dt) for _, f, dt in copies], cand, T_XLATE[band])
+            top = score([(f, dt) for _, f, dt in copies], cand, [x[3] for x in cp])
             if not top:
                 state, best, second = "nofit", None, None
             else:
@@ -383,7 +402,7 @@ def run(con, where, tle_dir, verbose=False):
     for gen, burst, bid, t, band, lat, lon, cp in singles:
         ref = [r[0] for r in con.execute("SELECT f0 FROM attr WHERE gen=? AND bid=? AND state='clear' AND n>1 "
                                          "AND t BETWEEN ? AND ?", (gen, bid, t - REF_S, t + REF_S))]
-        k, f, tc = cp[0]
+        k, f, tc, _ = cp[0]
         copies = [(k, f, 0.0)]
         if not ref:
             if t < newest - REF_S:
