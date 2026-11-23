@@ -155,11 +155,24 @@ if [ "$DEPS" -eq 1 ]; then
   info "Packages"
   if have apt-get; then
     PKGS=(build-essential cmake pkg-config git python3 curl usbutils iproute2 gzip
-          libfftw3-dev libusb-1.0-0-dev libairspy-dev libhackrf-dev
+          libfftw3-dev libusb-1.0-0-dev
           python3-sgp4 python3-numpy)   # the observatory's satellite attribution and beacon positions
     as_root apt-get install -y -q --no-install-recommends "${PKGS[@]}" \
       || die "could not install the build tools — see apt's message above"
-    ok "build tools, FFTW, Airspy and HackRF support, SGP4 and NumPy installed"
+    ok "build tools, FFTW, SGP4 and NumPy installed"
+    # SDR libraries one at a time, and optional: a library already installed some other way (a PPA,
+    # built from source, another SDR program) is used as it is, and one apt can't install alongside
+    # it only costs that input.
+    for sdr in airspy:Airspy hackrf:HackRF; do
+      lib="lib${sdr%%:*}"; name="${sdr#*:}"
+      if pkg-config --exists "$lib"; then
+        ok "$name support: $lib $(pkg-config --modversion "$lib") already installed"
+      elif as_root apt-get install -y -q --no-install-recommends "$lib-dev"; then
+        ok "$name support installed"
+      else
+        warn "could not install $lib-dev (see apt's message above): building without $name input"
+      fi
+    done
   else
     warn "not a Debian/Ubuntu system — install by hand: cmake, a C compiler, pkg-config, FFTW3"
     warn "(single precision), libairspy, libhackrf, python3 (and its sgp4 and numpy modules, for the"
