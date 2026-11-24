@@ -49,7 +49,7 @@ static void usage(void) {
 	        "                   hackrf[:SERIAL], rtl_tcp:HOST:PORT, spyserver:HOST:PORT\n"
 	        "  -F FMT           raw file format: cu8, cs8, cs16, cf32\n"
 	        "  -c HZ            centre frequency (live input; default 1544.5e6)\n"
-	        "  -s RATE          sample rate (live input; default 2.5e6)\n"
+	        "  -s RATE          sample rate (live input; default 2.5e6, rtl_tcp 2.56e6)\n"
 	        "  -g GAIN -b       gain, bias-tee (antenna power) for live input\n"
 	        "  --start S --dur S  part of a recording to process\n"
 	        "  --bands LIST     galileo,glonass (default), quiet = noise-only test band\n"
@@ -243,6 +243,7 @@ static void emit_sgb(const sgb_rec_t *r, double t0_ms) {
 
 int main(int argc, char **argv) {
 	const char *inspec = NULL, *fmt = NULL, *gain = NULL, *bands_s = "galileo,glonass";
+	int rate_set = 0;
 	double center = 1544.5e6, rate = 2.5e6, start = 0, dur = -1, thr = 13;
 	int L = 10, combine = 1, bias = 0, quiet = 0, with_llr = 1, do_sgb = 1, sgb_threads = 4;
 	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7, stats_s = 0, repeat_win = 1200;
@@ -257,7 +258,7 @@ int main(int argc, char **argv) {
 		case 'i': inspec = optarg; break;
 		case 'F': fmt = optarg; break;
 		case 'c': center = atof(optarg); break;
-		case 's': rate = atof(optarg); break;
+		case 's': rate = atof(optarg); rate_set = 1; break;
 		case 'g': gain = optarg; break;
 		case 'b': bias = 1; break;
 		case 'u': if (out_add_udp(optarg)) return 1; break;
@@ -286,6 +287,9 @@ int main(int argc, char **argv) {
 	fgb_init();
 	input_t *in;
 	if (input_is_live(inspec)) {
+		// An RTL dongle drops samples at 2.5 MS/s (not a clean divide of its 28.8 MHz crystal) and
+		// is clean at 2.56, which still leaves each band stream (fs/20) room for its 126 kHz.
+		if (!rate_set && !strncmp(inspec, "rtl_tcp", 7)) rate = 2.56e6;
 		live_opts_t lo2 = {.center_hz = center, .rate = rate, .half_span = 0.5e6, .gain = gain, .bias = bias};
 		in = input_open_live(inspec, &lo2);
 	} else {

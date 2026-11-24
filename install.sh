@@ -288,6 +288,9 @@ else
     rtl_tcp*) gain="$(ask "Gain in dB, or auto" "${CUR_GAIN:-auto}")";;
     *)        gain="$(ask "Node gain index, or default" "${CUR_GAIN:-default}")";;
   esac
+  # The default rate follows the source: an RTL dongle drops samples at 2.5 MS/s (not a clean
+  # divide of its 28.8 MHz crystal) and is clean at 2.56; the Airspy doesn't offer 2.56.
+  case "$CUR_RATE" in 2.5e6|2.56e6) case "$src" in rtl_tcp*) CUR_RATE=2.56e6;; *) CUR_RATE=2.5e6;; esac;; esac
   RX_ARGS="-i $src -c $CUR_CENTER -s $CUR_RATE"
   case "$gain" in auto|default|"") ;; *) RX_ARGS+=" -g $gain";; esac
   case "$src" in airspy*|hackrf*|rtl_tcp*)
