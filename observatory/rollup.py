@@ -59,6 +59,17 @@ import satattr
 
 SCHEMA_VERSION = 4
 GROUP_S = 1.5
+# Another relay's copy of a burst decoded with errors (a BCH miscorrection) looks like a different
+# beacon heard at the same moment: same band, within the relays' spread in time (40 ms), and its
+# frame a few bits from the true one (BCH-1's minimum distance is 7; the SGB code's about 13). Two
+# real beacons that close in time differ in 21+ bits (FGB, measured over 21 days at one station).
+# The decode to believe is the beacon heard before (a miscorrection lands on an ID never heard), and
+# between two IDs neither heard before, the better decode; the other counts as one more relay copy
+# of it. Two IDs both heard before are two beacons (neighbouring serials can be that close).
+TWIN_S = 0.05
+TWIN_BITS = {1: 20, 2: 40}
+KNOWN_N, KNOWN_S = 5, 7 * 86400   # "heard before": 5 other bursts within a week
+TWINS_VERSION = "1"     # the stored bursts are cleaned of twins once per version
 
 
 def init_db(con):
@@ -251,6 +262,109 @@ def ensure_frame(con, hexs, gen, tool, seen):
                  json.dumps(d.get("lines", []))))
 
 
+# ---------- twins: one transmission decoded as two beacons ----------
+
+def frame_dist(gen, a, b):
+    """Bits between two frames: FGB over bits 25-108 (protected data and BCH-1), SGB the whole frame."""
+    n = min(len(a), len(b), 21 if gen == 1 else 63)
+    return bin(int(a[:n], 16) ^ int(b[:n], 16)).count("1")
+
+
+def known(con, gen, bid, t, skip=-1):
+    """The beacon has KNOWN_N other bursts within KNOWN_S of t."""
+    table = "fgb_bursts" if gen == 1 else "sgb_bursts"
+    return con.execute(f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE bid=? AND t BETWEEN ? AND ? AND id!=? "
+                       "LIMIT ?)", (bid, t - KNOWN_S, t + KNOWN_S, skip, KNOWN_N)).fetchone()[0] >= KNOWN_N
+
+
+def rank(known_, single, relays, ebn0):
+    """Which of two decodes of one transmission to believe: the beacon heard before, then a strict
+    decode, then more relays decoded to the same frame, then the stronger."""
+    return (int(known_), single or 0, relays or 0, ebn0 if ebn0 is not None else -99.0)
+
+
+def twin_of(con, gen, t, band, bid, hexs, new_known, skip=-1):
+    """The stored burst of another beacon that this decode is a miscorrected copy of (or the true
+    copy of): (id, rank), or None. Not one of a beacon heard before when this one is too."""
+    table = "fgb_bursts" if gen == 1 else "sgb_bursts"
+    best = None
+    for i, b, h, single, relays, ebn0 in con.execute(
+            f"SELECT id, bid, hex, single, relays, ebn0 FROM {table} WHERE t BETWEEN ? AND ? AND band=? AND bid!=? "
+            "AND id!=?", (t - TWIN_S, t + TWIN_S, band, bid, skip)):
+        d = frame_dist(gen, hexs, h)
+        if d > TWIN_BITS[gen] or (best is not None and d >= best[0]):
+            continue
+        k = known(con, gen, b, t, i)
+        if new_known and k:
+            continue
+        best = (d, i, rank(k, single, relays, ebn0))
+    return best[1:] if best else None
+
+
+def unattribute(con, gen, burst):
+    con.execute("DELETE FROM attr WHERE gen=? AND burst=?", (gen, burst))
+    con.execute("UPDATE copies SET sat=NULL, el=NULL, f_res=NULL, t_res=NULL, slat=NULL, slon=NULL, salt=NULL "
+                "WHERE gen=? AND burst=?", (gen, burst))
+
+
+def absorb(con, gen, loser, winner):
+    """Folds burst loser (a wrong decode) into winner (the same transmission, decoded right): an FGB
+    loser's relay copies and carriers join the winner's; an SGB loser's copies are dropped (their
+    times are offsets from the loser's own first copy). Both are attributed again."""
+    if gen == 1:
+        have = con.execute("SELECT k, f_hz FROM copies WHERE gen=1 AND burst=?", (winner,)).fetchall()
+        k = max([x for x, _ in have], default=-1) + 1
+        fs = [f for _, f in have]
+        for tc, f, eb, band in con.execute("SELECT tc, f_hz, ebn0, band FROM copies WHERE gen=1 AND burst=? ORDER BY k",
+                                           (loser,)).fetchall():
+            if all(abs(f - f2) > 20 for f2 in fs):
+                con.execute("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0,band) VALUES(1,?,?,?,?,?,?)",
+                            (winner, k, tc, f, eb, band))
+                fs.append(f)
+                k += 1
+        lb = con.execute("SELECT fbins, comb FROM fgb_bursts WHERE id=?", (loser,)).fetchone()
+        wb = con.execute("SELECT fbins, comb, relays FROM fgb_bursts WHERE id=?", (winner,)).fetchone()
+        bins = set(filter(None, (wb[0] or "").split(","))) | set(filter(None, (lb[0] or "").split(",")))
+        con.execute("UPDATE fgb_bursts SET fbins=?, relays=? WHERE id=?",
+                    (",".join(sorted(bins)), max(len(bins), wb[1] or 0, wb[2] or 1), winner))
+    con.execute(f"DELETE FROM {'fgb_bursts' if gen == 1 else 'sgb_bursts'} WHERE id=?", (loser,))
+    con.execute("DELETE FROM copies WHERE gen=? AND burst=?", (gen, loser))
+    unattribute(con, gen, loser)
+    unattribute(con, gen, winner)
+
+
+def clean_twins(con, verbose=False):
+    """Once per TWINS_VERSION: folds the twins already stored (before the rule, or by an older
+    rollup) into the bursts they are copies of. Returns the number folded per generation."""
+    if (con.execute("SELECT value FROM meta WHERE key='twins'").fetchone() or [None])[0] == TWINS_VERSION:
+        return None
+    done = {}
+    for gen, table in ((1, "fgb_bursts"), (2, "sgb_bursts")):
+        lose = {}   # id -> the burst it is a wrong copy of
+        for bid_, t, band, bid, h, single, relays, ebn0 in con.execute(
+                f"SELECT id, t, band, bid, hex, single, relays, ebn0 FROM {table} ORDER BY t").fetchall():
+            k = known(con, gen, bid, t, bid_)
+            tw = twin_of(con, gen, t, band, bid, h, k, bid_)
+            if tw and (tw[1], -tw[0]) > (rank(k, single, relays, ebn0), -bid_):   # a tie: the earlier stays
+                lose[bid_] = tw[0]
+        for loser in sorted(lose):
+            w = lose[loser]
+            seen = {loser}
+            while w in lose and w not in seen:   # the winner lost to a better one in turn
+                seen.add(w)
+                w = lose[w]
+            if w in lose:
+                continue    # (a loop: can't happen with a strict order, but never fold into a folded one)
+            absorb(con, gen, loser, w)
+        done[gen] = len(lose)
+    con.execute("INSERT INTO meta(key,value) VALUES('twins',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (TWINS_VERSION,))
+    con.commit()
+    if done[1] or done[2] or verbose:
+        print(f"rollup: folded {done[1]} FGB and {done[2]} SGB miscorrected copies into their bursts")
+    return done
+
+
 # ---------- records ----------
 
 class Ingest:
@@ -344,7 +458,6 @@ class Ingest:
         """One copy of a burst: merged with the beacon's burst within GROUP_S, or a new burst row.
         combined: this copy was not decoded alone (relay-combined, matched or repeat-decoded)."""
         bid = hexs[:15]
-        ensure_frame(self.con, hexs, 1, self.tool, self.seen)
         row = self.con.execute("SELECT id, fbins, comb, ebn0, combined_only, single FROM fgb_bursts "
                                "WHERE bid=? AND t BETWEEN ? AND ? ORDER BY ABS(t-?) LIMIT 1",
                                (bid, t - GROUP_S, t + GROUP_S, t)).fetchone()
@@ -357,11 +470,24 @@ class Ingest:
                              "WHERE id=?", (",".join(sorted(bins)), c, max(len(bins), c, 1),
                                             e if e > -99 else None, co and combined, max(s0, single), bid_id))
             return bid_id
-        else:
-            return self.con.execute("INSERT INTO fgb_bursts(t,band,bid,hex,ebn0,relays,fbins,comb,combined_only,single,"
-                             "selftest,f_hz,cn0,via) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                             (t, band, bid, hexs, ebn0 if ebn0 is not None else ebn0_any,
-                              max(1 if fb else 0, comb, 1), fb, comb, combined, single, selftest, f_hz, cn0, via)).lastrowid
+        relays = max(1 if fb else 0, comb, 1)
+        k = known(self.con, 1, bid, t)
+        tw = twin_of(self.con, 1, t, band, bid, hexs, k)
+        if tw and tw[1] >= rank(k, single, relays, ebn0 if ebn0 is not None else ebn0_any):
+            # Another relay's copy of that burst, decoded wrong: one more carrier of it.
+            fbins, c0, r0 = self.con.execute("SELECT fbins, comb, relays FROM fgb_bursts WHERE id=?", (tw[0],)).fetchone()
+            bins = set(filter(None, (fbins or "").split(","))) | ({fb} if fb else set())
+            self.con.execute("UPDATE fgb_bursts SET fbins=?, relays=? WHERE id=?",
+                             (",".join(sorted(bins)), max(len(bins), c0 or 0, r0 or 1), tw[0]))
+            return tw[0]
+        ensure_frame(self.con, hexs, 1, self.tool, self.seen)
+        new = self.con.execute("INSERT INTO fgb_bursts(t,band,bid,hex,ebn0,relays,fbins,comb,combined_only,single,"
+                               "selftest,f_hz,cn0,via) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (t, band, bid, hexs, ebn0 if ebn0 is not None else ebn0_any,
+                                relays, fb, comb, combined, single, selftest, f_hz, cn0, via)).lastrowid
+        if tw:      # the stored one was the wrong copy
+            absorb(self.con, 1, tw[0], new)
+        return new
 
     def sgb(self, r, t):
         acc = r.get("accept", "single" if r.get("ok") else "")   # Python scan: ok means accepted
@@ -372,20 +498,28 @@ class Ingest:
         s = sgb_basic(hexs)
         if not any(bits_of(hexs, 252)[2:204]):
             return
-        ensure_frame(self.con, hexs, 2, self.tool, self.seen)
         rel = r.get("relays") or []
         eb = [x.get("ebn0") for x in rel if x.get("ebn0") is not None]
+        single = int(acc == "single" and "6 errors" not in r.get("how", ""))
+        bid = f"{s['country']}-{s['tac']}-{s['serial']}"
+        k = known(self.con, 2, bid, t)
+        tw = twin_of(self.con, 2, t, r.get("band"), bid, hexs, k)
+        if tw and tw[1] >= rank(k, single, len(rel) or 1, max(eb) if eb else None):
+            return      # a wrong decode of a burst already stored
+        ensure_frame(self.con, hexs, 2, self.tool, self.seen)
         cur = self.con.execute(
             "INSERT OR IGNORE INTO sgb_bursts(t,tq,band,bid,hex,tac,serial,country,test,relays,ebn0,ebn0s,how,"
             "alone,single,f_hz) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (t, round(t * 10), r.get("band"), f"{s['country']}-{s['tac']}-{s['serial']}", hexs, s["tac"],
+            (t, round(t * 10), r.get("band"), bid, hexs, s["tac"],
              s["serial"], s["country"], s["test"], len(rel) or 1, max(eb) if eb else None,
              " ".join(f"{e:.1f}" for e in eb), r.get("how", ""), int(any(x.get("alone") for x in rel)),
-             int(acc == "single" and "6 errors" not in r.get("how", "")), r.get("f_hz")))
+             single, r.get("f_hz")))
         if cur.rowcount == 1:   # each relay's copy, for satellite attribution
             self.con.executemany("INSERT INTO copies(gen,burst,k,tc,f_hz,ebn0,band) VALUES(2,?,?,?,?,?,?)",
                                  [(cur.lastrowid, k, x["dt_ms"] / 1000, x["f_hz"], x.get("ebn0"), r.get("band"))
                                   for k, x in enumerate(rel) if x.get("f_hz") is not None and x.get("dt_ms") is not None])
+            if tw:      # the stored one was the wrong decode
+                absorb(self.con, 2, tw[0], cur.lastrowid)
 
     def flush(self):
         self.con.executemany(
@@ -470,6 +604,7 @@ def main():
         days = sorted(glob.glob(os.path.join(a.archive, "meosar-*.jsonl")) + gz,
                       key=lambda f: os.path.basename(f).replace(".gz", ""))
         files = days + extra
+    clean_twins(con)
     ing = Ingest(con, tool)
     arch = os.path.abspath(a.archive)
     total = 0

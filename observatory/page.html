@@ -35,6 +35,7 @@
   th[data-k]{cursor:pointer} th[data-k]:hover{color:var(--fg)}
   td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
   tr.click{cursor:pointer} tr.click:hover td{background:var(--panel2)} tr.sel td{background:#1d2a3a}
+  tr.group td{background:var(--panel2)} tr.member td:first-child{padding-left:22px}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   .dim{color:var(--dim)}
   a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
@@ -110,7 +111,7 @@ const estPos = e => !e ? "" : `<span title="${esc(estTitle(e))}">≈ <a href="ht
 const coarse = (lat, lon) => Math.abs(lat * 4 - Math.round(lat * 4)) < 1e-4 && Math.abs(lon * 4 - Math.round(lon * 4)) < 1e-4;
 const posOrEst = b => b.lat != null ? pos(b) : estPos(b.est);
 const country = b => `${esc(b.country_name || "")} <span class="dim">${b.country ?? ""}</span>`;
-let S = null, sel = null, typeOn = new Set(), sortK = "last", sortDir = -1;
+let S = null, sel = null, typeOn = new Set(), sortK = "last", sortDir = -1, testOpen = false;
 try { const h = localStorage.getItem("meosar.hours"); if (h !== null) $("hours").value = h; } catch (e) {}
 if (STATION) { $("station").textContent = " · " + STATION; document.title = "MEOSAR · " + STATION; }
 
@@ -118,7 +119,7 @@ function tiles() {
   const T = S.totals, ty = T.types;
   const op = Object.entries(ty).filter(([k]) => !["orbitography", "test"].includes(k)).reduce((a, [, v]) => a + v, 0);
   const items = [
-    ["Beacons", T.beacons, `${ty.orbitography || 0} orbitography · ${ty.test || 0} test · ${op} other`],
+    ["Beacons", T.beacons - (ty.test || 0), `${ty.orbitography || 0} orbitography · ${op} other · and ${ty.test || 0} test IDs`],
     ["Bursts decoded", T.bursts, `${T.only_combined} only by combining relays · ${T.by_repeat || 0} by repeats`],
     ["SGB beacons", T.sgb_beacons, `${T.sgb_bursts} bursts`],
     ["Countries", T.countries, "of registration"],
@@ -207,13 +208,29 @@ function beacons() {
   if (!B.length) { $("beacons").innerHTML = `<p class="dim">None in this window.</p>`; return; }
   const maxb = Math.max(...B.map(b => b.bursts));
   const th = (k, l, r) => `<th data-k="${k}" class="${r ? "r" : ""}">${l}${sortK === k ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
-  $("beacons").innerHTML = `<table><tr>${th("id", "Beacon ID")}${th("btype", "Type")}${th("ident", "Identification")}${th("country_name", "Country")}${th("lat", "Position")}${th("bursts", "Bursts")}${th("ebn0", "Best Eb/N0", 1)}${th("relays", "Sats", 1)}${th("last", "Last heard")}</tr>` +
-    B.slice(0, 1000).map(b => `<tr class="click ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${pill(b.btype)}${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td>` +
+  const row = (b, cls) => `<tr class="click ${cls} ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${pill(b.btype)}${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td>` +
       `<td>${esc(b.ident || b.protocol || "")}</td><td>${country(b)}</td><td>${posOrEst(b)}</td>` +
       `<td><span class="bar" style="width:${Math.max(3, b.bursts / maxb * 100)}px"></span> <span class="dim">${b.bursts}</span></td>` +
-      `<td class="r">${f1(b.ebn0)} dB</td><td class="r">${b.relays}</td><td class="dim">${ts(b.last)}</td></tr>`).join("") + "</table>";
+      `<td class="r">${f1(b.ebn0)} dB</td><td class="r">${b.relays}</td><td class="dim">${ts(b.last)}</td></tr>`;
+  // Test transmitters change their ID bits from frame to frame, so one of them is many IDs: folded
+  // into one row unless asked for (the test chip, or a search).
+  const fold = !q && !typeOn.has("test");
+  const tests = fold ? B.filter(b => b.btype === "test") : [];
+  const rest = fold ? B.filter(b => b.btype !== "test") : B;
+  let group = "";
+  if (tests.length) {
+    const nb = tests.reduce((a, b) => a + b.bursts, 0), last = Math.max(...tests.map(b => b.last));
+    group = `<tr class="click group" id="testgroup"><td>${testOpen ? "▾" : "▸"} ${pill("test")}</td><td colspan="2">Test transmitters: <b>${tests.length}</b> IDs` +
+      ` <span class="dim">(their ID bits change from frame to frame)</span></td><td></td><td></td><td><span class="dim">${nb}</span></td>` +
+      `<td class="r">${f1(Math.max(...tests.map(b => b.ebn0 ?? -99)))} dB</td><td></td><td class="dim">${ts(last)}</td></tr>` +
+      (testOpen ? tests.slice(0, 1000).map(b => row(b, "member")).join("") : "");
+  }
+  $("beacons").innerHTML = `<table><tr>${th("id", "Beacon ID")}${th("btype", "Type")}${th("ident", "Identification")}${th("country_name", "Country")}${th("lat", "Position")}${th("bursts", "Bursts")}${th("ebn0", "Best Eb/N0", 1)}${th("relays", "Sats", 1)}${th("last", "Last heard")}</tr>` +
+    group + rest.slice(0, 1000).map(b => row(b, "")).join("") + "</table>";
   $("beacons").querySelectorAll("th[data-k]").forEach(h => h.onclick = () => { const k = h.dataset.k; sortDir = sortK === k ? -sortDir : -1; sortK = k; beacons(); });
-  $("beacons").querySelectorAll("tr.click").forEach(r => r.onclick = () => detail(r.dataset.id));
+  $("beacons").querySelectorAll("tr.click[data-id]").forEach(r => r.onclick = () => detail(r.dataset.id));
+  const g = $("testgroup");
+  if (g) g.onclick = () => { testOpen = !testOpen; beacons(); };
 }
 
 function sgb() {

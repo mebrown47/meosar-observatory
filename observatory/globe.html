@@ -160,7 +160,13 @@ const nameOf = b => b.gen === 2 ? `TAC ${b.tac} #${b.serial}` : b.id;
 
 let D = null, selected = null, fitted = false;
 const opts = {nopos: false, tracks: true, labels: true, sats: true}, typeOff = new Set();
-try { Object.assign(opts, JSON.parse(localStorage.getItem("meosar.globe.opts") || "{}")); (JSON.parse(localStorage.getItem("meosar.globe.off") || "[]")).forEach(t => typeOff.add(t)); } catch (e) {}
+// Test transmitters (many IDs each, often a placeholder position) start hidden; the test chip shows them.
+typeOff.add("test");
+try {
+  Object.assign(opts, JSON.parse(localStorage.getItem("meosar.globe.opts") || "{}"));
+  const off = localStorage.getItem("meosar.globe.off");
+  if (off !== null) { typeOff.clear(); JSON.parse(off).forEach(t => typeOff.add(t)); }
+} catch (e) {}
 try { const h = localStorage.getItem("meosar.hours"); if (h !== null) $("hours").value = h; } catch (e) {}
 const save = () => { try { localStorage.setItem("meosar.globe.opts", JSON.stringify(opts)); localStorage.setItem("meosar.globe.off", JSON.stringify([...typeOff])); } catch (e) {} };
 if (STATION) { $("station").textContent = " · " + STATION; document.title = "MEOSAR Globe · " + STATION; }
