@@ -11,15 +11,18 @@ estimated from the relays where the beacons don't report one.
 ground stations, not through this program. Don't use it for alerting, and check that receiving
 and decoding these signals is allowed where you are.
 
-Status: running continuously on one station since November 2026, on an Airspy. The HackRF,
-rtl_tcp and spyserver inputs come from inmarsat-rx, where they are in use, but haven't been tested
-with meosar-rx yet. `proto/` holds the Python prototype used to design and measure the receiver
+Status: running continuously on one station since November 2026, on an Airspy. An RTL-SDR dongle
+through rtl_tcp has been tested on a second station, on a Raspberry Pi (see [RTL-SDR](#rtl-sdr)).
+The HackRF and spyserver inputs come from inmarsat-rx, where they are in use, but haven't been
+tested with meosar-rx yet. `proto/` holds the Python prototype used to design and measure the receiver
 (see `proto/README.md`); a station doesn't need it.
 
 ## What you need
 
-- An SDR that covers 1544.5 MHz at 2.5 MS/s (the default; both SAR bands fit in it). Airspy is
-  tested; HackRF, rtl_tcp and spyserver sources are supported.
+- An SDR that covers 1544.5 MHz at 2.5 MS/s (the default; both SAR bands fit in it). Airspy and
+  RTL-SDR (through rtl_tcp) are tested; HackRF and spyserver sources are supported.
+- A computer with about 1.5 cores of a recent PC to spare. Second-generation acquisition is most
+  of that; a Raspberry Pi keeps up with first-generation beacons only (`--no-sgb`).
 - An L-band antenna with a view of the sky and a low-noise amplifier. `-b` powers an LNA over the
   coax (bias-tee).
 - Linux with systemd for the station install (Debian or Ubuntu: the installer fetches the
@@ -65,6 +68,46 @@ candidate on stdout (and over UDP with `-u HOST:PORT`). With `--archive DIR` rec
 appended to one file per UTC day, and `--stats 600` adds a status record every 10 minutes.
 `meosar-rx` with no arguments lists every option, and `--version` prints the version (from the
 latest `v*` tag, as `git describe` gives it; the start record carries it too).
+
+## RTL-SDR
+
+An RTL-SDR dongle works through `rtl_tcp` (in the `rtl-sdr` package):
+
+```bash
+rtl_tcp -a 127.0.0.1 -p 1234 -T &       # -T: bias-tee on, to power the LNA (a recent rtl_tcp)
+./build/meosar-rx -i rtl_tcp:127.0.0.1:1234 -g 40 -b --stats 600
+```
+
+- The rate is 2.56 MS/s by default for rtl_tcp. An R820T dongle drops samples at 2.5 MS/s (not
+  a clean divide of its 28.8 MHz crystal) and none at 2.56.
+- R820T and R828D tuners reach 1544.5 MHz; a dongle with a TCXO (RTL-SDR Blog V3, V4) is best.
+  The LNA at the antenna matters more than with an Airspy.
+- The kernel's DVB-T driver takes the dongle when it's plugged in, unless it is blacklisted. The
+  rtl-sdr packages usually do that; after a build from source, put `blacklist dvb_usb_rtl28xxu`,
+  `rtl2832_sdr`, `rtl2832` and `rtl2830` (one per line) in a file in `/etc/modprobe.d/` and run
+  `sudo modprobe -r dvb_usb_rtl28xxu`, or replug the dongle.
+- rtl_tcp sometimes ignores a plain stop and keeps the dongle busy: `pkill -9 rtl_tcp`.
+- The station installer takes `rtl_tcp:HOST:PORT` as its source but doesn't run rtl_tcp: start it
+  yourself, or as a service of its own.
+
+Tested in November 2026 on a second station: an R820T dongle on a Raspberry Pi with 4 cores
+(Debian 13), with its own L-band antenna and LNA, against the Airspy station over the same
+13½ minutes (first-generation beacons):
+
+| | Airspy station | RTL-SDR on a Pi |
+|---|---|---|
+| Bursts decoded | 666 | 436 |
+| Beacons confirmed | 80 | 43 (29 of them also at the Airspy station) |
+| Eb/N0 on the 294 bursts both decoded | | median 1.0 dB lower (middle half −3.4 to +1.3 dB) |
+
+The two stations have different antennas and locations, so this compares whole setups, not only
+the SDRs; each also heard beacons the other didn't. Second-generation beacons decoded on the
+RTL-SDR too, in the runs with them on, though the Pi processed only a sixth of the signal then.
+
+Speed is the limit on a Pi. Second-generation acquisition is about 85% of the receiver's load: a
+laptop (Core i7-11800H) runs everything in about 1.5 cores, but the Pi ran at 0.16× real time with
+it and lost most of the signal. With `--no-sgb` it ran at 0.95–0.97× real time with no samples
+dropped in 14 minutes, still a little short, so over hours it will drop some.
 
 ## Beacon fields and positions: dec406 (optional)
 
