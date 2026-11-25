@@ -90,6 +90,12 @@ rtl_tcp -a 127.0.0.1 -p 1234 -T &       # -T: bias-tee on, to power the LNA (a r
 - The station installer takes `rtl_tcp:HOST:PORT` as its source but doesn't run rtl_tcp: start it
   yourself, or as a service of its own.
 
+`meosar-rtl-test.sh` does a test run in one go: it installs what's missing, builds meosar-rx from
+GitHub, takes the dongle from the DVB-T driver, checks it for lost samples, records for two hours
+(`--hours N`) with the bias-tee on (`--no-bias` for a passive antenna), and prints a summary and
+packs the results into one file to send back. On a Raspberry Pi it leaves second-generation
+beacons off (`--sgb` to turn them on). `bash meosar-rtl-test.sh --help` lists the options.
+
 Tested in November 2026 on a second station: an R820T dongle on a Raspberry Pi with 4 cores
 (Debian 13), with its own L-band antenna and LNA, against the Airspy station over the same
 13½ minutes (first-generation beacons):
