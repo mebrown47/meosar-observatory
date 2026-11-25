@@ -11,9 +11,9 @@
 static const uint8_t KNOWN_N[24] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 0,0,0,1,0,1,1,1,1};
 static const uint8_t KNOWN_S[24] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 0,1,1,0,1,0,0,0,0};
 
-// ---- FFT helper with a small plan cache ----
+// ---- FFT helper with a small plan cache, one per thread (candidates are demodulated in parallel) ----
 typedef struct { int n; fftwf_plan p; fftwf_complex *in, *out; } fft_t;
-static fft_t fft_cache[8];
+static _Thread_local fft_t fft_cache[8];
 static fft_t *fft_get(int n) {
 	for (int i = 0; i < 8; i++)
 		if (fft_cache[i].n == n) return &fft_cache[i];
@@ -23,7 +23,9 @@ static fft_t *fft_get(int n) {
 			f->n = n;
 			f->in = fftwf_malloc(sizeof(fftwf_complex) * n);
 			f->out = fftwf_malloc(sizeof(fftwf_complex) * n);
+			fftw_plan_lock();
 			f->p = fftwf_plan_dft_1d(n, f->in, f->out, FFTW_FORWARD, FFTW_ESTIMATE);
+			fftw_plan_unlock();
 			return f;
 		}
 	return NULL;

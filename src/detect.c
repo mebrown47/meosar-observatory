@@ -47,13 +47,16 @@ int fgb_detect(const cf_t *y, size_t n, double f1, double mid, double lo, double
 		if (f >= lo && f < hi) { if (s0 < 0) s0 = s; s1 = s; }
 	}
 	int nb = s1 - s0 + 1;
-	static fftwf_plan plan;
-	static fftwf_complex *in, *outf;
-	static float win[DET_NFFT];
+	// One plan per thread: the bands are searched in parallel.
+	static _Thread_local fftwf_plan plan;
+	static _Thread_local fftwf_complex *in, *outf;
+	static _Thread_local float win[DET_NFFT];
 	if (!plan) {
 		in = fftwf_malloc(sizeof(fftwf_complex) * N);
 		outf = fftwf_malloc(sizeof(fftwf_complex) * N);
+		fftw_plan_lock();
 		plan = fftwf_plan_dft_1d(N, in, outf, FFTW_FORWARD, FFTW_MEASURE);
+		fftw_plan_unlock();
 		for (int i = 0; i < N; i++) win[i] = (float)(0.5 - 0.5 * cos(2 * M_PI * i / (N - 1)));
 	}
 	float *P = malloc(sizeof(float) * (size_t)nfr * nb);

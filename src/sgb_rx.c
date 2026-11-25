@@ -47,8 +47,10 @@ sgb_acq_t *sgb_acq_new(double fs_in, double span_hz, int threads) {
 	const float *ci = sgb_chips_i(SGB_NORMAL), *cq = sgb_chips_q(SGB_NORMAL);
 	a->S = fftwf_malloc(sizeof(fftwf_complex) * (size_t)NSEG * TN);
 	fftwf_complex *tmp = fftwf_malloc(sizeof(fftwf_complex) * TN), *tmp2 = fftwf_malloc(sizeof(fftwf_complex) * TN);
+	fftw_plan_lock();
 	a->fwd = fftwf_plan_dft_1d(TN, tmp, tmp2, FFTW_FORWARD, FFTW_MEASURE);
 	a->inv = fftwf_plan_dft_1d(TN, tmp, tmp2, FFTW_BACKWARD, FFTW_MEASURE);
+	fftw_plan_unlock();
 	for (int j = 0; j < NSEG; j++) {
 		a->o[j] = (int)floor(j * S);
 		float *g = (float *)tmp;

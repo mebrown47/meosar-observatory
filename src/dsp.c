@@ -2,8 +2,13 @@
 #include "dsp.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+
+static pthread_mutex_t fftw_plan_mu = PTHREAD_MUTEX_INITIALIZER;
+void fftw_plan_lock(void) { pthread_mutex_lock(&fftw_plan_mu); }
+void fftw_plan_unlock(void) { pthread_mutex_unlock(&fftw_plan_mu); }
 
 static double bessel_i0(double x) {
 	double s = 1, t = 1;

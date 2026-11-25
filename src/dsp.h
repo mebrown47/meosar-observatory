@@ -8,6 +8,10 @@
 
 typedef float complex cf_t;
 
+// FFTW's planner isn't thread-safe (running a plan is): plans are made between these.
+void fftw_plan_lock(void);
+void fftw_plan_unlock(void);
+
 // Low-pass FIR, Kaiser-windowed sinc, unit DC gain (as scipy.signal.firwin(ntaps, cutoff,
 // fs=fs, window=("kaiser", beta))).
 float *fir_lowpass(int ntaps, double cutoff_hz, double fs, double beta);

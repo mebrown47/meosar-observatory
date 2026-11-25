@@ -10,10 +10,12 @@
 #include <pthread.h>
 #include <math.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "detect.h"
 #include "dsp.h"
@@ -41,6 +43,101 @@ typedef struct {
 static volatile sig_atomic_t stop;
 static void on_sig(int s) { (void)s; stop = 1; }
 
+// ---- worker pool: FGB detection (per band) and demodulation (per candidate) in parallel ----
+// Persistent threads, so each keeps its FFT plans (per thread) from block to block. pool_run()
+// hands out jobs 0..n-1 to the workers and the calling thread, and returns when all are done.
+typedef struct {
+	pthread_t th[16];
+	int nth, quit, gen, busy, njobs;
+	atomic_int next;
+	void (*fn)(void *ctx, int job);
+	void *ctx;
+	pthread_mutex_t mu;
+	pthread_cond_t go, done;
+} pool_t;
+
+static void pool_jobs(pool_t *p) {
+	for (int j; (j = atomic_fetch_add(&p->next, 1)) < p->njobs;) p->fn(p->ctx, j);
+}
+
+static void *pool_main(void *arg) {
+	pool_t *p = arg;
+	int seen = 0;
+	pthread_mutex_lock(&p->mu);
+	for (;;) {
+		while (!p->quit && p->gen == seen) pthread_cond_wait(&p->go, &p->mu);
+		if (p->quit) break;
+		seen = p->gen;
+		pthread_mutex_unlock(&p->mu);
+		pool_jobs(p);
+		pthread_mutex_lock(&p->mu);
+		if (--p->busy == 0) pthread_cond_signal(&p->done);
+	}
+	pthread_mutex_unlock(&p->mu);
+	return NULL;
+}
+
+// nthreads: all of them, the caller included (1 = no extra threads).
+static void pool_init(pool_t *p, int nthreads) {
+	memset(p, 0, sizeof *p);
+	pthread_mutex_init(&p->mu, NULL);
+	pthread_cond_init(&p->go, NULL);
+	pthread_cond_init(&p->done, NULL);
+	for (int i = 0; i < nthreads - 1 && i < 16; i++)
+		if (!pthread_create(&p->th[p->nth], NULL, pool_main, p)) p->nth++;
+}
+
+static void pool_run(pool_t *p, void (*fn)(void *, int), void *ctx, int njobs) {
+	if (njobs <= 0) return;
+	pthread_mutex_lock(&p->mu);
+	p->fn = fn; p->ctx = ctx; p->njobs = njobs;
+	atomic_store(&p->next, 0);
+	p->busy = p->nth;
+	p->gen++;
+	pthread_cond_broadcast(&p->go);
+	pthread_mutex_unlock(&p->mu);
+	pool_jobs(p);
+	pthread_mutex_lock(&p->mu);
+	while (p->busy > 0) pthread_cond_wait(&p->done, &p->mu);
+	pthread_mutex_unlock(&p->mu);
+}
+
+static void pool_free(pool_t *p) {
+	pthread_mutex_lock(&p->mu);
+	p->quit = 1;
+	pthread_cond_broadcast(&p->go);
+	pthread_mutex_unlock(&p->mu);
+	for (int i = 0; i < p->nth; i++) pthread_join(p->th[i], NULL);
+}
+
+// One block's FGB work, shared by the jobs.
+typedef struct {
+	band_t *bands;
+	cf_t **loc;
+	size_t *len;
+	double *t_y0;
+	double thr, f1;
+	int L;
+	cand_t *cands[3];
+	int nc[3];
+	int *jb, *jc;          // candidate job -> band, candidate
+	fgb_rec_t *jrec;       // candidate job -> its record
+	char *jok;
+} fgb_work_t;
+
+static void detect_job(void *ctx, int bi) {
+	fgb_work_t *w = ctx;
+	band_t *b = &w->bands[bi];
+	w->nc[bi] = fgb_detect(w->loc[bi], w->len[bi], w->f1, b->mid, b->lo, b->hi, w->t_y0[bi], w->thr, w->cands[bi], 4096);
+}
+
+static void demod_job(void *ctx, int j) {
+	fgb_work_t *w = ctx;
+	int bi = w->jb[j];
+	const cand_t *c = &w->cands[bi][w->jc[j]];
+	w->jok[j] = (char)fgb_process_candidate(w->loc[bi], w->len[bi], w->f1, w->bands[bi].mid, w->t_y0[bi], c->t, c->f, w->L, &w->jrec[j]);
+}
+
 static void usage(void) {
 	fprintf(stderr,
 	        "meosar-rx " MEOSAR_VERSION "\n"
@@ -57,6 +154,7 @@ static void usage(void) {
 	        "  --no-combine     no relay combining         --no-llr  leave soft bits out of records\n"
 	        "  --no-repeat      no repeat combining        --repeat-window S  how long weak bursts wait (1200)\n"
 	        "  --no-sgb         FGB only                   --sgb-threads N (4)  --sgb-span HZ (8000)\n"
+	        "  --fgb-threads N  FGB detection and demodulation threads (one per CPU, up to 4)\n"
 	        "  --sgb-thr Z (19) acquisition threshold      --sgb-prez Z (7) preamble threshold\n"
 	        "  -u HOST:PORT     UDP output (repeatable)    -q  nothing on stdout\n"
 	        "  --archive DIR    also append records to DIR/meosar-YYYY-MM-DD.jsonl (UTC day)\n"
@@ -247,11 +345,11 @@ int main(int argc, char **argv) {
 	double center = 1544.5e6, rate = 2.5e6, start = 0, dur = -1, thr = 13;
 	int L = 10, combine = 1, bias = 0, quiet = 0, with_llr = 1, do_sgb = 1, sgb_threads = 4;
 	double sgb_span = 8000, sgb_thr = 19, sgb_prez = 7, stats_s = 0, repeat_win = 1200;
-	int do_repeat = 1;
+	int do_repeat = 1, fgb_threads = 0;
 	static struct option lo[] = {
 		{"start", 1, 0, 1}, {"dur", 1, 0, 2}, {"bands", 1, 0, 3}, {"thr", 1, 0, 4}, {"L", 1, 0, 5},
 		{"no-combine", 0, 0, 6}, {"no-llr", 0, 0, 7}, {"no-sgb", 0, 0, 8}, {"sgb-threads", 1, 0, 9},
-		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"no-repeat", 0, 0, 15}, {"repeat-window", 1, 0, 16}, {"help", 0, 0, 'h'}, {"version", 0, 0, 'V'}, {0, 0, 0, 0}};
+		{"sgb-span", 1, 0, 10}, {"sgb-thr", 1, 0, 11}, {"sgb-prez", 1, 0, 12}, {"archive", 1, 0, 13}, {"stats", 1, 0, 14}, {"no-repeat", 0, 0, 15}, {"repeat-window", 1, 0, 16}, {"fgb-threads", 1, 0, 17}, {"help", 0, 0, 'h'}, {"version", 0, 0, 'V'}, {0, 0, 0, 0}};
 	int o;
 	while ((o = getopt_long(argc, argv, "i:F:c:s:g:bu:qhV", lo, NULL)) != -1) {
 		switch (o) {
@@ -279,6 +377,7 @@ int main(int argc, char **argv) {
 		case 14: stats_s = atof(optarg); break;
 		case 15: do_repeat = 0; break;
 		case 16: repeat_win = atof(optarg); break;
+		case 17: fgb_threads = atoi(optarg); break;
 		case 'V': printf("meosar-rx %s\n", MEOSAR_VERSION); return 0;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
@@ -346,7 +445,15 @@ int main(int argc, char **argv) {
 	double t_block = start, blk = 8.0, t_end = dur > 0 ? start + dur : INFINITY;
 	int cap = 4096;
 	fgb_rec_t *recs = malloc(sizeof(fgb_rec_t) * cap);
-	cand_t *cands = malloc(sizeof(cand_t) * 4096);
+	if (fgb_threads <= 0) {
+		long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+		fgb_threads = ncpu < 1 ? 1 : ncpu > 4 ? 4 : (int)ncpu;
+	}
+	pool_t pool;
+	pool_init(&pool, fgb_threads);
+	fgb_work_t W = {.bands = bands, .f1 = f1, .thr = thr, .L = L};
+	for (int bi = 0; bi < nb; bi++) W.cands[bi] = malloc(sizeof(cand_t) * 4096);
+	int jcap = 0;
 	long long n_cand = 0, n_acc = 0;
 	cf_t *loc[3] = {0};
 	size_t loc_cap[3] = {0};
@@ -377,18 +484,39 @@ int main(int argc, char **argv) {
 		pthread_mutex_unlock(&R.mu);
 		if (t_stop <= t_block) break;
 
-		int nrec = 0;
+		// Detection, one job per band; then every candidate of this block demodulated, one job each.
+		// Both in parallel (the pool); the records are then taken in band and candidate order, so
+		// the output is the same as one thread's.
+		double t_y0s[3];
+		for (int bi = 0; bi < nb; bi++) t_y0s[bi] = start + (double)base[bi] / f1;
+		W.loc = loc; W.len = len; W.t_y0 = t_y0s;
+		pool_run(&pool, detect_job, &W, nb);
+		int nj = 0;
+		for (int bi = 0; bi < nb; bi++) nj += W.nc[bi];
+		if (nj > jcap) {
+			jcap = nj + nj / 2;
+			W.jb = realloc(W.jb, sizeof(int) * jcap); W.jc = realloc(W.jc, sizeof(int) * jcap);
+			W.jrec = realloc(W.jrec, sizeof(fgb_rec_t) * jcap); W.jok = realloc(W.jok, (size_t)jcap);
+		}
+		nj = 0;
+		for (int bi = 0; bi < nb; bi++)
+			for (int c = 0; c < W.nc[bi]; c++) {
+				if (W.cands[bi][c].t < t_block || W.cands[bi][c].t >= t_stop) continue;   // owned by another block
+				W.jb[nj] = bi; W.jc[nj] = c; nj++;
+			}
+		pool_run(&pool, demod_job, &W, nj);
+
+		int nrec = 0, j = 0;
 		for (int bi = 0; bi < nb; bi++) {
 			band_t *b = &bands[bi];
-			double t_y0 = start + (double)base[bi] / f1;
-			int nc = fgb_detect(loc[bi], len[bi], f1, b->mid, b->lo, b->hi, t_y0, thr, cands, 4096);
+			double t_y0 = t_y0s[bi];
 			int first = nrec;
-			for (int c = 0; c < nc && nrec < cap - 64; c++) {
-				if (cands[c].t < t_block || cands[c].t >= t_stop) continue;   // owned by another block
-				fgb_rec_t *r = &recs[nrec];
-				if (!fgb_process_candidate(loc[bi], len[bi], f1, b->mid, t_y0, cands[c].t, cands[c].f, L, r)) continue;
-				r->det_snr = cands[c].snr_db;
-				r->band = b->name;
+			for (; j < nj && W.jb[j] == bi; j++) {
+				if (nrec >= cap - 64) continue;
+				if (!W.jok[j]) continue;
+				recs[nrec] = W.jrec[j];
+				recs[nrec].det_snr = W.cands[bi][W.jc[j]].snr_db;
+				recs[nrec].band = b->name;
 				nrec++;
 			}
 			n_cand += nrec - first;
@@ -450,6 +578,7 @@ int main(int argc, char **argv) {
 	pthread_mutex_unlock(&R.mu);
 	in->close(in);
 	pthread_join(rth, NULL);
+	pool_free(&pool);
 	out_close();
 	return 0;
 }
