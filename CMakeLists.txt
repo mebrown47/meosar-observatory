@@ -50,4 +50,12 @@ foreach(lib AIRSPY HACKRF)
 	endif()
 endforeach()
 
-install(TARGETS meosar-rx RUNTIME DESTINATION bin)
+# dec406's hex decoder (MIT, third_party/dec406): the observatory's frame fields and reported
+# positions. A separate program; the receiver compiles none of it. Built quietly, as upstream has it.
+file(GLOB DEC406_SRC third_party/dec406/src/*.c)
+add_executable(dec406_hex ${DEC406_SRC})
+target_include_directories(dec406_hex PRIVATE third_party/dec406/include)
+target_compile_options(dec406_hex PRIVATE -w)
+target_link_libraries(dec406_hex m)
+
+install(TARGETS meosar-rx dec406_hex RUNTIME DESTINATION bin)

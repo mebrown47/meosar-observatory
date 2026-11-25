@@ -7,4 +7,8 @@ Independent implementation from the Cospas-Sarsat specifications C/S T.001 (firs
 beacons) and C/S T.018 (second-generation beacons). dec406 (https://github.com/moricef/dec406,
 MIT) was used as a reference: for constants (BCH generators, frame sync words, PRN seeds and
 LFSR), test vectors, and as the baseline in comparisons. No dec406 code is compiled into this
-program. src/mids.c lists ITU Maritime Identification Digits, cross-checked with dec406's table.
+program (the receiver). src/mids.c lists ITU Maritime Identification Digits, cross-checked with dec406's table.
+
+third_party/dec406/ is dec406's hex decoder, copied unchanged (MIT licence, Copyright (c) 2026
+Fabrice Morel; see third_party/dec406/LICENSE and README.md). It builds into a separate program,
+dec406_hex, which the observatory runs for each frame's fields and reported position.

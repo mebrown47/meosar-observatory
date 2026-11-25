@@ -354,13 +354,12 @@ else
   STATION_POS="$(ask "Station position, LAT,LON in degrees, to ~1 km: the globe and satellite attribution use it (none for none)" "${STATION_POS:-none}")"
   [ "$STATION_POS" = none ] && STATION_POS=""
   KEEP_DAYS="$(ask "Days of raw archive to keep (0 = keep everything; the database keeps every burst)" "$KEEP_DAYS")"
-  # dec406's hex decoder gives the observatory each frame's fields and position.
-  def_dec="${DEC406_HEX:-}"
-  [ -z "$def_dec" ] && [ -x "$HOME/dec406/build/dec406_hex" ] && def_dec="$HOME/dec406/build/dec406_hex"
-  DEC406_HEX="$(ask "dec406's hex decoder, for beacon fields and positions (none for none)" "${def_dec:-none}")"
-  [ "$DEC406_HEX" = none ] && DEC406_HEX=""
-  if [ -n "$DEC406_HEX" ] && [ ! -x "$DEC406_HEX" ]; then
-    warn "$DEC406_HEX is not an executable: the observatory will show basic fields only"
+  # dec406's hex decoder gives the observatory each frame's fields and position. A copy comes
+  # with this repo (third_party/dec406); a path uses another build, none goes without.
+  DEC406_HEX="$(ask "dec406's hex decoder, for beacon fields and positions (bundled, a path, or none)" "${DEC406_HEX:-bundled}")"
+  if [ "$DEC406_HEX" != bundled ] && [ "$DEC406_HEX" != none ] && [ ! -x "$DEC406_HEX" ]; then
+    warn "$DEC406_HEX is not an executable: using the bundled one"
+    DEC406_HEX=bundled
   fi
   case "$KEEP_DAYS" in ''|*[!0-9]*) die "days must be a whole number";; esac
   # One SDR serves one program at a time. Another receiver here that uses the same SDR can be
@@ -407,7 +406,8 @@ STATION_POS="$STATION_POS"
 # Observatory dashboard port.
 OBS_PORT="$OBS_PORT"
 
-# dec406's hex decoder, for each frame's fields and position ("" = basic fields only).
+# dec406's hex decoder, for each frame's fields and position: bundled (the copy installed with
+# meosar-rx), a path to another build, or none (basic fields only, no reported positions).
 DEC406_HEX="$DEC406_HEX"
 
 # Days of raw archive to keep; files older than a day are compressed. 0 keeps everything.
@@ -464,7 +464,7 @@ fi
 info "Installing program files to $PREFIX"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/bin" "$STAGE/observatory"
-cp "$BIN" "$STAGE/bin/"
+cp "$BIN" "$BUILD_DIR/dec406_hex" "$STAGE/bin/"
 cp "$REPO_ROOT"/observatory/{rollup.py,satattr.py,geoloc.py,server.py,page.html,globe.html} "$STAGE/observatory/"
 cp -r "$REPO_ROOT"/observatory/static "$STAGE/observatory/"   # the globe's script and vendored assets
 cat > "$STAGE/bin/meosar-tidy" <<'EOF'
@@ -614,8 +614,13 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-DEC_ARG="--dec406 ''"
-[ -n "$DEC406_HEX" ] && DEC_ARG="--dec406 $DEC406_HEX"
+# dec406: "" in configs from before the bundled copy means bundled too.
+case "$DEC406_HEX" in
+  none) DEC_ARG="--dec406 ''";;
+  ""|bundled) DEC_ARG="--dec406 $PREFIX/bin/dec406_hex";;
+  *) if [ -x "$DEC406_HEX" ]; then DEC_ARG="--dec406 $DEC406_HEX"
+     else warn "$DEC406_HEX is not an executable: the rollup uses the bundled dec406"; DEC_ARG="--dec406 $PREFIX/bin/dec406_hex"; fi;;
+esac
 root_write "$OBS_UNIT" 0644 <<EOF
 $MARKER — don't edit; change $CONF instead.
 [Unit]

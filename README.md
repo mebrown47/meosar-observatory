@@ -118,18 +118,14 @@ laptop (Core i7-11800H) runs everything in about 1.5 cores, but the Pi ran at 0.
 it and lost most of the signal. With `--no-sgb` it ran at 0.95–0.97× real time with no samples
 dropped in 14 minutes, still a little short, so over hours it will drop some.
 
-## Beacon fields and positions: dec406 (optional)
+## Beacon fields and positions: dec406 (bundled)
 
 The observatory decodes each frame's fields (protocol, country, identification, the position the
-beacon reports) with the hex decoder of [dec406](https://github.com/moricef/dec406). Without it the
-dashboard shows the beacon ID, protocol, type and country only. To build it:
-
-```bash
-git clone https://github.com/moricef/dec406 ~/dec406
-make -C ~/dec406 build/dec406_hex
-```
-
-The installer finds `~/dec406/build/dec406_hex` on its own.
+beacon reports) with the hex decoder of [dec406](https://github.com/moricef/dec406) by Fabrice
+Morel (MIT). A copy comes with this repo in `third_party/dec406`, unchanged, and builds with the
+receiver into `dec406_hex`; the installer uses it unless you give it another build's path, or
+`none`. The positions beacons report are also what satellite attribution works from, so without
+dec406 the dashboard shows no satellites and the globe only the positions estimated from relays.
 
 ## Install as a station (systemd)
 
@@ -162,7 +158,7 @@ internet; put it behind a VPN or an authenticating proxy if you want it from out
 ## MEOSAR Observatory
 
 `observatory/rollup.py` merges the relayed copies of each burst into one row, decodes every
-distinct frame once (with dec406's hex decoder when it is installed: protocol, identification,
+distinct frame once (with dec406's hex decoder, unless it is set to none: protocol, identification,
 position), and counts candidates per hour. `observatory/server.py` serves the dashboard: beacons
 of both generations with their fields and positions, bursts over time, satellites per burst, the
 receiver's status, and each beacon's burst history. A beacon is shown once it is confirmed: a

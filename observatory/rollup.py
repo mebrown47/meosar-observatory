@@ -262,6 +262,25 @@ def ensure_frame(con, hexs, gen, tool, seen):
                  json.dumps(d.get("lines", []))))
 
 
+def redecode_frames(con, tool, verbose):
+    """dec406 is here and wasn't when these frames were stored: decode them again, so the beacons
+    heard so far get their fields and reported positions (and their bursts satellite attribution)."""
+    n = 0
+    for hexs, gen, btype in con.execute("SELECT hex, gen, btype FROM frames WHERE fields='[]'").fetchall():
+        d = dec406_fields(tool, hexs)
+        if not d or not d["lines"]:
+            continue
+        if gen == 2 and d.get("ident"):
+            btype = "test" if btype == "test" else d["ident"].split()[0]
+        pos = d.get("pos") or (None, None)
+        con.execute("UPDATE frames SET btype=?, country_name=?, ident=?, lat=?, lon=?, fields=? WHERE hex=?",
+                    (btype, d.get("country_name"), d.get("ident"), pos[0], pos[1], json.dumps(d["lines"]), hexs))
+        n += 1
+    con.commit()
+    if verbose or n:
+        print(f"rollup: dec406 is new here: {n} frame(s) decoded again")
+
+
 # ---------- twins: one transmission decoded as two beacons ----------
 
 def frame_dist(gen, a, b):
@@ -605,6 +624,10 @@ def main():
                       key=lambda f: os.path.basename(f).replace(".gz", ""))
         files = days + extra
     clean_twins(con)
+    if tool and (con.execute("SELECT value FROM meta WHERE key='dec406'").fetchone() or ["no"])[0] != "yes":
+        redecode_frames(con, tool, a.verbose)
+        con.execute("INSERT INTO meta(key,value) VALUES('dec406','yes') ON CONFLICT(key) DO UPDATE SET value='yes'")
+        con.commit()
     ing = Ingest(con, tool)
     arch = os.path.abspath(a.archive)
     total = 0
