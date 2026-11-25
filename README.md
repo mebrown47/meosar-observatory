@@ -87,8 +87,11 @@ rtl_tcp -a 127.0.0.1 -p 1234 -T &       # -T: bias-tee on, to power the LNA (a r
   `rtl2832_sdr`, `rtl2832` and `rtl2830` (one per line) in a file in `/etc/modprobe.d/` and run
   `sudo modprobe -r dvb_usb_rtl28xxu`, or replug the dongle.
 - rtl_tcp sometimes ignores a plain stop and keeps the dongle busy: `pkill -9 rtl_tcp`.
-- The station installer takes `rtl_tcp:HOST:PORT` as its source but doesn't run rtl_tcp: start it
-  yourself, or as a service of its own.
+- For a station, choose the source `rtlsdr` (or `rtlsdr:INDEX` for another dongle) in
+  `./install.sh` (`--reconfigure` on an installed station): it installs the rtl-sdr tools, keeps the
+  DVB-T driver off the dongle, and runs rtl_tcp as a service of its own (`meosar-rtltcp`, on
+  127.0.0.1:7355) that starts and stops with the receiver, at 2.56 MS/s, with the bias-tee if asked;
+  on a Raspberry Pi it leaves second-generation beacons off unless asked.
 
 `meosar-rtl-test.sh` does a test run in one go: it installs what's missing, builds meosar-rx from
 GitHub, takes the dongle from the DVB-T driver, checks it for lost samples, records for two hours
@@ -133,7 +136,8 @@ The installer finds `~/dec406/build/dec406_hex` on its own.
 ```bash
 git clone https://github.com/mebrown47/meosar-observatory.git meosar-rx && cd meosar-rx
 ./install.sh            # asks for source, gain, bias-tee, station name and position; --help for the rest
-./install.sh --update   # git pull, rebuild, test, reinstall, restart
+./install.sh --update   # git pull, rebuild, test, reinstall, restart (keeps the settings)
+./install.sh --reconfigure   # ask the questions again (to change the source, say)
 ```
 
 This installs the receiver (`meosar-rx.service`, daily archive in `/var/lib/meosar-rx/archive`),
