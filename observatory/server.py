@@ -135,6 +135,24 @@ def burst_sats(con, gen, ids):
     return out
 
 
+# What a beacon was doing in the window. A distress beacon sends a burst about every 50 s once it
+# is activated; a self-test is one burst with the self-test sync word. Most beacons heard are
+# self-tests, test transmitters and orbitography (system) beacons; an alert is a distress-type
+# beacon heard in distress mode ALERT_N times or more over ALERT_S or more.
+ALERT_N, ALERT_S = 5, 600
+
+
+def classify(btype, n, selftests, nspan, test=False):
+    if test or btype in ("orbitography", "test"):
+        return "system"
+    normal = n - (selftests or 0)
+    if normal >= ALERT_N and (nspan or 0) >= ALERT_S:
+        return "alert"
+    if (selftests or 0) > 0.8 * n:
+        return "selftest"
+    return "brief"
+
+
 def build_overview(db, hours, where=None):
     con = connect_ro(db)
     try:
@@ -151,15 +169,17 @@ def build_overview(db, hours, where=None):
         # First-generation beacons: confirmed by a strict single decode or two separate bursts.
         rows = con.execute(
             "SELECT bid, COUNT(*), MAX(single), MAX(ebn0), MAX(relays), MIN(t), MAX(t), SUM(selftest), "
-            "SUM(combined_only), (SELECT hex FROM fgb_bursts f2 WHERE f2.bid=f.bid AND t>=? ORDER BY t DESC LIMIT 1) "
+            "SUM(combined_only), (SELECT hex FROM fgb_bursts f2 WHERE f2.bid=f.bid AND t>=? ORDER BY t DESC LIMIT 1), "
+            "MAX(CASE WHEN selftest=0 THEN t END) - MIN(CASE WHEN selftest=0 THEN t END) "
             "FROM fgb_bursts f WHERE t>=? GROUP BY bid", (t0, t0)).fetchall()
         beacons = []
-        for bid, n, single, eb, rel, first, last, st, co, hexs in rows:
+        for bid, n, single, eb, rel, first, last, st, co, hexs, nspan in rows:
             if not single and n < 2:
                 continue
             fi = frame_info(con, hexs)
             beacons.append({"id": bid, "hex": hexs, "bursts": n, "ebn0": eb, "relays": rel, "first": first,
-                            "last": last, "selftest": st > 0.8 * n, "combined_only": co, **fi})
+                            "last": last, "selftest": st > 0.8 * n, "combined_only": co, **fi,
+                            "cls": classify(fi.get("btype"), n, st, nspan)})
         est = estimates(con)
         for b in beacons:
             b["est"] = est.get(b["id"])
@@ -177,7 +197,7 @@ def build_overview(db, hours, where=None):
             fi = frame_info(con, hexs)
             sgb.append({"id": bid, "hex": hexs, "bursts": n, "ebn0": eb, "relays": rel, "first": first, "last": last,
                         "test": bool(test), "combined_only": co, "tac": tac, "serial": serial, **fi,
-                        "country": country, "est": est.get(bid)})
+                        "country": country, "est": est.get(bid), "cls": classify(None, n, 0, last - first, bool(test))})
         sgb.sort(key=lambda b: -b["last"])
 
         # Activity: confirmed-beacon bursts and SGB bursts per bin.
@@ -210,6 +230,7 @@ def build_overview(db, hours, where=None):
             bands[band][k + "_cand"] += c or 0
             bands[band][k + "_acc"] += a or 0
         bt = collections.Counter(b.get("btype") or "other" for b in beacons)
+        classes = collections.Counter(b["cls"] for b in beacons + sgb)
         countries = {b.get("country") for b in beacons} | {b.get("country") for b in sgb}
 
         # Receiver: its last start and status record.
@@ -226,7 +247,8 @@ def build_overview(db, hours, where=None):
             "generated": time.time(), "newest": t1, "hours": hours, "bin_s": bin_s,
             "totals": {"beacons": len(beacons), "bursts": n_bursts, "only_combined": only_comb, "by_repeat": by_repeat,
                        "sgb_beacons": len(sgb), "sgb_bursts": sum(s["bursts"] for s in sgb),
-                       "countries": len(countries - {None}), "types": dict(bt.most_common())},
+                       "countries": len(countries - {None}), "types": dict(bt.most_common()),
+                       "classes": dict(classes)},
             "beacons": beacons, "sgb": sgb, "activity": activity, "relays": dict(sorted(relays.items())),
             "bands": dict(bands), "rx": rx, "last_rollup": float(meta.get("last_run", 0)),
             "dec406": meta.get("dec406") == "yes", "satellites": build_sats(con, t0),
@@ -311,7 +333,7 @@ def build_map(db, hours, where):
                           "fields": b.get("fields", []), "hex": b.get("hex"),
                           "tac": b.get("tac"), "serial": b.get("serial"),
                           "lat": tr[-1][1] if tr else None, "lon": tr[-1][2] if tr else None,
-                          "track": tr[-500:], "relay": relay.get(b["id"]), "est": b.get("est")})
+                          "track": tr[-500:], "relay": relay.get(b["id"]), "est": b.get("est"), "cls": b["cls"]})
     items.sort(key=lambda b: -b["last"])
     return {"generated": ov["generated"], "newest": ov["newest"], "hours": ov["hours"], "items": items,
             "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"], "satellites": sats,

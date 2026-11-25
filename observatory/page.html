@@ -52,6 +52,23 @@
   .fields{white-space:pre-wrap;margin:6px 0 0}
   footer{color:var(--dim);font-size:12px;padding:6px 22px 22px;max-width:1500px;margin:0 auto}
   svg text{fill:var(--dim);font-size:10px}
+  .pill.alert{color:#fff;background:var(--bad);border-color:var(--bad)}
+  /* Alerts: one card per beacon transmitting in distress mode */
+  #alertpanel{border-color:#6b2226}
+  .alerts{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:10px}
+  .acard{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--bad);border-radius:8px;padding:9px 12px;cursor:pointer;min-width:0}
+  .acard:hover{background:#222b36} .acard.sel{background:#1d2a3a}
+  .acard.past{border-left-color:#6b2226}
+  .acard .kind{font-weight:600;display:flex;align-items:center;gap:6px}
+  .acard .kind .c{color:var(--dim);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .acard .who{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+  .acard .meta{font-size:12px;color:var(--dim);margin-top:4px}
+  .acard .when{font-size:12.5px;margin-top:4px}
+  .live{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--bad);box-shadow:0 0 0 0 rgba(248,81,73,.7);animation:pulse 1.6s infinite;flex:none}
+  .live.off{background:#6b2226;animation:none}
+  @keyframes pulse{70%{box-shadow:0 0 0 7px rgba(248,81,73,0)}100%{box-shadow:0 0 0 0 rgba(248,81,73,0)}}
+  @media (prefers-reduced-motion:reduce){.live{animation:none}}
+  .intro{color:var(--dim);font-size:12.5px;margin:0 0 10px}
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
 </head>
@@ -70,6 +87,11 @@
 </header>
 <main>
   <div class="tiles" id="tiles"></div>
+  <div class="panel" id="alertpanel"><h2><span>Alerts <span class="hint" id="alerthint"></span></span></h2>
+    <p class="intro">An alert is a distress beacon that has been transmitting for 10 minutes or more. Most of
+      them were set off by accident or during maintenance. Everything else heard here is a self-test, a test
+      transmitter or one of the system's own orbitography beacons; those are folded into the table below.</p>
+    <div id="alerts"></div></div>
   <div class="grid">
     <div class="panel"><h2>Activity <span class="hint" id="acthint"></span></h2><div id="activity"></div></div>
     <div>
@@ -100,8 +122,15 @@ const ts = t => t ? esc(iso(t).slice(0, 19).replace("T", " ")) : "—";
 const hm = t => iso(t).slice(11, 16);
 const ago = s => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${(s / 3600).toFixed(1)} h` : `${(s / 86400).toFixed(1)} d`;
 const f1 = x => x == null ? "—" : Number(x).toFixed(1);
-const TYPE = {orbitography: "acc", test: "warn", ELT: "bad", EPIRB: "bad", PLB: "bad", SSAS: "bad", RLS: "bad"};
+// Red is for alerts only: the type pills stay quiet.
+const TYPE = {orbitography: "acc", test: "warn"};
 const pill = t => `<span class="pill ${TYPE[t] || "dim"}">${esc(t || "other")}</span>`;
+const CLS = {alert: `<span class="pill alert" title="transmitting in distress mode for 10 minutes or more">alert</span>`,
+  brief: `<span class="pill warn" title="distress mode, but fewer than 5 bursts or under 10 minutes">brief</span>`,
+  selftest: `<span class="pill dim">self-test</span>`, system: ""};
+const KIND = {ELT: "Aircraft beacon (ELT)", EPIRB: "Ship beacon (EPIRB)", PLB: "Personal beacon (PLB)",
+  SSAS: "Ship security alert (SSAS)", RLS: "Return-link beacon (RLS)"};
+const live = b => S.newest - b.last < 300;     // a burst in the last 5 minutes: still transmitting
 const pos = b => b.lat == null ? "" : `<a href="https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=9/${b.lat}/${b.lon}" target="_blank" rel="noopener">${b.lat.toFixed(3)}, ${b.lon.toFixed(3)}</a>`;
 // A position estimated from the relayed copies (geoloc.py), where the frames carry none.
 const kmFmt = r => r >= 10 ? Math.round(r) : r.toFixed(1);
@@ -111,20 +140,48 @@ const estPos = e => !e ? "" : `<span title="${esc(estTitle(e))}">≈ <a href="ht
 const coarse = (lat, lon) => Math.abs(lat * 4 - Math.round(lat * 4)) < 1e-4 && Math.abs(lon * 4 - Math.round(lon * 4)) < 1e-4;
 const posOrEst = b => b.lat != null ? pos(b) : estPos(b.est);
 const country = b => `${esc(b.country_name || "")} <span class="dim">${b.country ?? ""}</span>`;
-let S = null, sel = null, typeOn = new Set(), sortK = "last", sortDir = -1, testOpen = false;
+let S = null, sel = null, typeOn = new Set(), sortK = "last", sortDir = -1, open = new Set(), allAlerts = false;
 try { const h = localStorage.getItem("meosar.hours"); if (h !== null) $("hours").value = h; } catch (e) {}
 if (STATION) { $("station").textContent = " · " + STATION; document.title = "MEOSAR · " + STATION; }
 
 function tiles() {
-  const T = S.totals, ty = T.types;
-  const op = Object.entries(ty).filter(([k]) => !["orbitography", "test"].includes(k)).reduce((a, [, v]) => a + v, 0);
+  const T = S.totals, ty = T.types, C = T.classes || {};
+  const nLive = [...S.beacons, ...S.sgb].filter(b => b.cls === "alert" && live(b)).length;
   const items = [
-    ["Beacons", T.beacons - (ty.test || 0), `${ty.orbitography || 0} orbitography · ${op} other · and ${ty.test || 0} test IDs`],
+    ["Alerts", C.alert || 0, `${nLive} transmitting now · ${C.brief || 0} brief`],
+    ["Beacons", T.beacons - (ty.test || 0), `${C.selftest || 0} self-tests · ${ty.orbitography || 0} orbitography · and ${ty.test || 0} test IDs`],
     ["Bursts decoded", T.bursts, `${T.only_combined} only by combining relays · ${T.by_repeat || 0} by repeats`],
     ["SGB beacons", T.sgb_beacons, `${T.sgb_bursts} bursts`],
     ["Countries", T.countries, "of registration"],
   ];
   $("tiles").innerHTML = items.map(([k, v, sm]) => `<div class="card"><div class="k">${k}</div><div class="v">${v} <small>${sm}</small></div></div>`).join("");
+}
+
+function alerts() {
+  const A = [...S.beacons.map(b => ({...b, gen: 1})), ...S.sgb.map(b => ({...b, gen: 2}))].filter(b => b.cls === "alert")
+    .sort((a, b) => (live(b) - live(a)) || b.last - a.last);
+  const nb = (S.totals.classes || {}).brief || 0;
+  $("alerthint").textContent = `${A.length} in this window · ${A.filter(live).length} transmitting now` +
+    (nb ? ` · ${nb} brief distress-mode transmissions in the table` : "");
+  if (!A.length) { $("alerts").innerHTML = `<p class="dim">No beacon has transmitted an alert in this window.</p>`; return; }
+  // The ones transmitting now, and the latest others up to ten cards; the rest on request.
+  const keep = Math.max(10, A.filter(live).length), shownA = allAlerts ? A : A.slice(0, keep);
+  $("alerts").innerHTML = `<div class="alerts">` + shownA.map(b => {
+    const on = live(b), dur = ago(b.last - b.first);
+    const where = b.lat != null ? pos(b) : b.est ? estPos(b.est) : `<span class="dim">position unknown</span>`;
+    return `<div class="acard ${on ? "" : "past"} ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}" tabindex="0" role="button">` +
+      `<div class="kind"><span class="live ${on ? "" : "off"}"></span>${esc(KIND[b.btype] || (b.gen === 2 ? "Second-generation beacon" : "Beacon"))}</div>` +
+      `<div class="who"><b>${esc(b.country_name || "")}</b> <span class="dim">· ${esc(b.ident || b.protocol || "")}</span></div>` +
+      `<div class="when">${on ? `<b>Transmitting now</b> · for ${dur}` : `Last heard ${ago(S.newest - b.last)} ago · transmitted for ${dur}`}</div>` +
+      `<div class="meta">${where}</div>` +
+      `<div class="meta mono">${esc(b.id)} · ${b.bursts} bursts · up to ${b.relays} satellites</div></div>`;
+  }).join("") + `</div>` + (A.length > keep ? `<p style="margin:10px 0 0"><span class="chip" id="allalerts">` +
+    (allAlerts ? "Show fewer" : `Show all ${A.length} alerts`) + `</span></p>` : "");
+  if ($("allalerts")) $("allalerts").onclick = () => { allAlerts = !allAlerts; alerts(); };
+  $("alerts").querySelectorAll(".acard").forEach(c => {
+    c.onclick = e => { if (!e.target.closest("a")) detail(c.dataset.id); };
+    c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); detail(c.dataset.id); } };
+  });
 }
 
 function activity() {
@@ -213,29 +270,37 @@ function beacons() {
   if (!B.length) { $("beacons").innerHTML = `<p class="dim">None in this window.</p>`; return; }
   const maxb = Math.max(...B.map(b => b.bursts));
   const th = (k, l, r) => `<th data-k="${k}" class="${r ? "r" : ""}">${l}${sortK === k ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
-  const row = (b, cls) => `<tr class="click ${cls} ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${pill(b.btype)}${b.selftest ? ' <span class="pill dim">self-test</span>' : ""}</td>` +
+  const row = (b, cls) => `<tr class="click ${cls} ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${pill(b.btype)} ${CLS[b.cls] || ""}</td>` +
       `<td>${esc(b.ident || b.protocol || "")}</td><td>${country(b)}</td><td>${posOrEst(b)}</td>` +
       `<td><span class="bar" style="width:${Math.max(3, b.bursts / maxb * 100)}px"></span> <span class="dim">${b.bursts}</span></td>` +
       `<td class="r">${f1(b.ebn0)} dB</td><td class="r">${b.relays}</td><td class="dim">${ts(b.last)}</td></tr>`;
-  // Test transmitters change their ID bits from frame to frame, so one of them is many IDs: folded
-  // into one row unless asked for (the test chip, or a search).
-  const fold = !q && !typeOn.has("test");
-  const tests = fold ? B.filter(b => b.btype === "test") : [];
-  const rest = fold ? B.filter(b => b.btype !== "test") : B;
-  let group = "";
-  if (tests.length) {
-    const nb = tests.reduce((a, b) => a + b.bursts, 0), last = Math.max(...tests.map(b => b.last));
-    group = `<tr class="click group" id="testgroup"><td>${testOpen ? "▾" : "▸"} ${pill("test")}</td><td colspan="2">Test transmitters: <b>${tests.length}</b> IDs` +
-      ` <span class="dim">(their ID bits change from frame to frame)</span></td><td></td><td></td><td><span class="dim">${nb}</span></td>` +
-      `<td class="r">${f1(Math.max(...tests.map(b => b.ebn0 ?? -99)))} dB</td><td></td><td class="dim">${ts(last)}</td></tr>` +
-      (testOpen ? tests.slice(0, 1000).map(b => row(b, "member")).join("") : "");
+  // Alerts first, then brief distress-mode transmissions. Self-tests, test transmitters (one of
+  // them is many IDs: their ID bits change from frame to frame) and orbitography beacons fold into
+  // a row each, unless asked for (their type chip, or a search).
+  const GROUPS = [
+    ["selftest", b => b.cls === "selftest", `<span class="pill dim">self-test</span>`, "Self-tests", "one burst or a few, sent to check the beacon works"],
+    ["test", b => b.btype === "test", pill("test"), "Test transmitters", "their ID bits change from frame to frame"],
+    ["orbitography", b => b.btype === "orbitography", pill("orbitography"), "Orbitography", "the system's own reference beacons"]];
+  const fold = !q && !typeOn.size;
+  let group = "", rest = B;
+  if (fold) {
+    for (const [k, f, p, name, why] of GROUPS) {
+      const G = rest.filter(f);
+      rest = rest.filter(b => !f(b));
+      if (!G.length) continue;
+      const nb = G.reduce((a, b) => a + b.bursts, 0), last = Math.max(...G.map(b => b.last));
+      group += `<tr class="click group" data-g="${k}"><td>${open.has(k) ? "▾" : "▸"} ${p}</td><td colspan="2">${name}: <b>${G.length}</b> IDs` +
+        ` <span class="dim">(${why})</span></td><td></td><td></td><td><span class="dim">${nb}</span></td>` +
+        `<td class="r">${f1(Math.max(...G.map(b => b.ebn0 ?? -99)))} dB</td><td></td><td class="dim">${ts(last)}</td></tr>` +
+        (open.has(k) ? G.slice(0, 1000).map(b => row(b, "member")).join("") : "");
+    }
+    rest = [...rest.filter(b => b.cls === "alert"), ...rest.filter(b => b.cls !== "alert")];
   }
   $("beacons").innerHTML = `<table><tr>${th("id", "Beacon ID")}${th("btype", "Type")}${th("ident", "Identification")}${th("country_name", "Country")}${th("lat", "Position")}${th("bursts", "Bursts")}${th("ebn0", "Best Eb/N0", 1)}${th("relays", "Sats", 1)}${th("last", "Last heard")}</tr>` +
-    group + rest.slice(0, 1000).map(b => row(b, "")).join("") + "</table>";
+    rest.slice(0, 1000).map(b => row(b, "")).join("") + group + "</table>";
   $("beacons").querySelectorAll("th[data-k]").forEach(h => h.onclick = () => { const k = h.dataset.k; sortDir = sortK === k ? -sortDir : -1; sortK = k; beacons(); });
   $("beacons").querySelectorAll("tr.click[data-id]").forEach(r => r.onclick = () => detail(r.dataset.id));
-  const g = $("testgroup");
-  if (g) g.onclick = () => { testOpen = !testOpen; beacons(); };
+  $("beacons").querySelectorAll("tr.group").forEach(g => g.onclick = () => { const k = g.dataset.g; open.has(k) ? open.delete(k) : open.add(k); beacons(); });
 }
 
 function sgb() {
@@ -243,15 +308,15 @@ function sgb() {
   $("shint").textContent = `${B.length} beacons`;
   if (!B.length) { $("sgb").innerHTML = `<p class="dim">None in this window.</p>`; return; }
   $("sgb").innerHTML = `<table><tr><th>Beacon</th><th>Type</th><th>Country</th><th class="r">TAC</th><th class="r">Serial</th><th>Position</th><th class="r">Bursts</th><th class="r">Best Eb/N0</th><th class="r">Sats</th><th>Last heard</th></tr>` +
-    B.map(b => `<tr class="click ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${b.test ? pill("test") : `<span class="pill sgb">${esc(b.btype || "SGB")}</span>`}</td>` +
+    B.map(b => `<tr class="click ${sel === b.id ? "sel" : ""}" data-id="${esc(b.id)}"><td class="mono">${esc(b.id)}</td><td>${b.test ? pill("test") : `<span class="pill sgb">${esc(b.btype || "SGB")}</span>`} ${CLS[b.cls] || ""}</td>` +
       `<td>${country(b)}</td><td class="r">${b.tac}</td><td class="r">${b.serial}</td><td>${posOrEst(b)}</td><td class="r">${b.bursts}</td>` +
       `<td class="r">${f1(b.ebn0)} dB</td><td class="r">${b.relays}</td><td class="dim">${ts(b.last)}</td></tr>`).join("") + "</table>";
   $("sgb").querySelectorAll("tr.click").forEach(r => r.onclick = () => detail(r.dataset.id));
 }
 
 async function detail(id) {
-  if (sel === id) { sel = null; $("detail").style.display = "none"; beacons(); sgb(); return; }
-  sel = id; beacons(); sgb();
+  if (sel === id) { sel = null; $("detail").style.display = "none"; alerts(); beacons(); sgb(); return; }
+  sel = id; alerts(); beacons(); sgb();
   const d = await (await fetch("api/beacon?id=" + encodeURIComponent(id), {cache: "no-store"})).json();
   const L = d.latest || {};
   let h = `<h2><span>Beacon <span class="mono">${esc(id)}</span> <span class="hint">${d.bursts.length}${d.bursts.length >= 1000 ? "+" : ""} bursts, all time · ${d.frames || 0} distinct frame${d.frames === 1 ? "" : "s"}</span></span><span class="chip" id="close">close</span></h2>`;
@@ -278,7 +343,7 @@ async function refresh() {
     const h = $("hours").value;
     S = await (await fetch("api/overview?hours=" + h, {cache: "no-store"})).json();
     if (S.empty) { $("status").textContent = "no data yet — waiting for the receiver and the rollup"; return; }
-    tiles(); activity(); rx(); relays(); sats(); typeChips(); beacons(); sgb();
+    tiles(); alerts(); activity(); rx(); relays(); sats(); typeChips(); beacons(); sgb();
     $("status").textContent = `newest ${hm(S.newest)} UTC`;
   } catch (e) {
     $("status").textContent = "cannot reach the station";
