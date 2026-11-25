@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import collections
+import glob
 import json
 import os
 import sqlite3
@@ -73,6 +74,21 @@ def estimates(con, bid=None):
     return out
 
 
+def positions(con, db_path, where):
+    """Why no beacon has an estimated position yet, for the pages to say; None once some have."""
+    if where is None:
+        return {"code": "no_station", "text": "No station position is set, so beacon positions can't be estimated "
+                "from the relays. Run ./install.sh --reconfigure and enter the station's LAT,LON."}
+    if estimates(con):
+        return None
+    tle_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "tle")
+    if not glob.glob(os.path.join(tle_dir, "????-??-??", "*.tle")):
+        return {"code": "no_tles", "text": "No satellite orbit data (TLEs) yet. The rollup fetches it from "
+                "celestrak.org every day: this machine needs to reach the internet."}
+    return {"code": "waiting", "text": "No beacon position estimated yet. A beacon needs 10 bursts relayed by two "
+            "satellites or more, over an hour or more; the estimates run every hour."}
+
+
 def build_sats(con, t0):
     """Satellite attribution in the window: per satellite, the bursts it relayed (clearly
     attributed ones), and where it is now; and how the bursts with a known beacon position fared."""
@@ -119,7 +135,7 @@ def burst_sats(con, gen, ids):
     return out
 
 
-def build_overview(db, hours):
+def build_overview(db, hours, where=None):
     con = connect_ro(db)
     try:
         t1 = newest(con)
@@ -214,6 +230,7 @@ def build_overview(db, hours):
             "beacons": beacons, "sgb": sgb, "activity": activity, "relays": dict(sorted(relays.items())),
             "bands": dict(bands), "rx": rx, "last_rollup": float(meta.get("last_run", 0)),
             "dec406": meta.get("dec406") == "yes", "satellites": build_sats(con, t0),
+            "positions": positions(con, db, where),
         }
     finally:
         con.close()
@@ -252,7 +269,7 @@ def build_beacon(db, bid):
 
 def build_map(db, hours, where):
     """Confirmed beacons of both generations with their last known position and track."""
-    ov = build_overview(db, hours)
+    ov = build_overview(db, hours, where)
     if ov.get("empty"):
         return {**ov, "station": where}
     t0 = ov["newest"] - ov["hours"] * 3600 if ov["hours"] > 0 else 0
@@ -297,7 +314,8 @@ def build_map(db, hours, where):
                           "track": tr[-500:], "relay": relay.get(b["id"]), "est": b.get("est")})
     items.sort(key=lambda b: -b["last"])
     return {"generated": ov["generated"], "newest": ov["newest"], "hours": ov["hours"], "items": items,
-            "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"], "satellites": sats}
+            "station": where, "rx": ov["rx"], "last_rollup": ov["last_rollup"], "satellites": sats,
+            "positions": ov["positions"]}
 
 
 STATIC_TYPES = {".js": "text/javascript", ".json": "application/json", ".jpg": "image/jpeg", ".css": "text/css",
@@ -355,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/map":
             self._json(build_map, self.db_path, arg("hours"), self.where)
         elif u.path == "/api/overview":
-            self._json(build_overview, self.db_path, arg("hours"))
+            self._json(build_overview, self.db_path, arg("hours"), self.where)
         elif u.path == "/api/beacon":
             self._json(build_beacon, self.db_path, arg("id"))
         elif u.path == "/healthz":

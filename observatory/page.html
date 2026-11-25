@@ -179,7 +179,12 @@ function sats() {
   $("sathint").textContent = `${clear} of ${all} bursts from beacons with a position attributed` +
     (st.ambiguous ? ` · ${st.ambiguous} ambiguous` : "") + (st.noref ? ` · ${st.noref} single copies without a reference` : "") + ref;
   const L = A.sats.filter(x => x.bursts || (x.now && x.now.el >= 5));
-  if (!L.length) { $("sats").innerHTML = `<p class="dim">No attributed bursts in this window.</p>`; return; }
+  if (!L.length) {
+    // Attribution works on bursts from beacons that report their own position (dec406 reads it).
+    const why = S.positions && S.positions.code !== "waiting" ? " " + S.positions.text :
+      !S.dec406 ? " Attribution uses beacons that report their own position, and reading it needs dec406's hex decoder, which isn't set up on this station." : "";
+    $("sats").innerHTML = `<p class="dim">No attributed bursts in this window.${esc(why)}</p>`; return;
+  }
   const max = Math.max(1, ...L.map(x => x.bursts));
   const alias = x => { const m = /\(([^)]+)\)/.exec(x.name || ""); return m ? ` <span class="dim">${esc(m[1])}</span>` : ""; };
   const now = x => !x.now ? "—" : x.now.el >= 5 ? `<span class="dot ok"></span>${x.now.el.toFixed(0)}° el · ${x.now.az}° az` :

@@ -31,6 +31,7 @@ usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import itertools
 import math
 import os
@@ -335,6 +336,19 @@ def update(db, tle_dir, st_ll, budget, verbose=False):
     init_table(con)
     con.commit()
     tles = SA.Tles(tle_dir)
+    if not tles.snaps:
+        # A fresh install: the rollup fetches the first TLEs within a minute or so. Without them
+        # every beacon would come out "none" and wait REDO_S for another try.
+        print(f"geoloc: no TLEs in {tle_dir} yet (the rollup fetches them): nothing to do")
+        con.close()
+        return
+    # Beacons marked "none" before the first TLEs arrived (a fresh install before this check
+    # existed) were never really tried: look at them again now rather than REDO_S later.
+    first = min(os.path.getmtime(d) for d in glob.glob(os.path.join(tle_dir, "????-??-??")))
+    n = con.execute("DELETE FROM geoloc WHERE quality='none' AND computed<?", (first,)).rowcount
+    con.commit()
+    if n and verbose:
+        print(f"geoloc: {n} beacon(s) marked before the first TLEs: trying again")
     station = SA.ecef(st_ll[0], st_ll[1], 0.1)
     t_end = time.time() + budget
     bids, since = due(con, time.time())

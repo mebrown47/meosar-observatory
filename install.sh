@@ -294,6 +294,9 @@ if [ -f "$CONF" ] && [ "$MODE" != reconfigure ]; then
   ok "keeping $CONF (./install.sh --reconfigure to redo it)"
   # shellcheck disable=SC1090
   . "$CONF"
+  if [ -z "${STATION_POS:-}" ]; then
+    warn "no station position (STATION_POS): the globe can't estimate beacon positions; ./install.sh --reconfigure to enter it"
+  fi
 else
   info "Config"
   OBS_PORT=8896; KEEP_DAYS=30; DEC406_HEX=""; STATION_POS=""; RX_ARGS=""; START_AT_BOOT=y; SHARE_WITH="-"

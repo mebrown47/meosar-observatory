@@ -259,7 +259,8 @@ function draw() {
     (nEst ? " · ≈ a position estimated from the relays, circled at 95%" : "") +
     (satList().length ? ` · <span style="color:${SAT_COLOR}">■</span> SAR satellites in view now · a selected beacon's latest burst links it to the <span style="color:${RELAY_COLOR}">■</span> satellites that relayed it` : "") + "</span>";
   $("empty").hidden = !!shown.length;
-  if (!shown.length) $("empty").textContent = D.items.length ? "No beacon in this window and selection reports a position." : "No beacons in this window yet.";
+  if (!shown.length) $("empty").textContent = D.items.length ? "No beacon in this window and selection reports a position." +
+    (D.positions ? " " + D.positions.text : "") : "No beacons in this window yet.";
   list();
   if (selected) detail();
 }
