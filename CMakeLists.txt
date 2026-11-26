@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(meosar-rx VERSION 0.1.7 LANGUAGES C)
+project(meosar-rx VERSION 0.1.8 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 if(NOT CMAKE_BUILD_TYPE)
