@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEOSAR Coverage</title>
+<style>
+  /* The observatory's dark station style; the sky plot as on iridium-observatory's Coverage page */
+  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c232c;--line:#2b333d;--fg:#e6edf3;--dim:#8b98a5;
+    --accent:#4aa8ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--grid:#242c36;--sat:#7ee787}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:18px;margin:0;font-weight:650}
+  header .sub{color:var(--dim);font-size:12.5px}
+  nav.pages{display:flex;gap:4px}
+  nav.pages a{color:var(--dim);text-decoration:none;padding:3px 10px;border-radius:6px;font-size:13px}
+  nav.pages a.on{color:var(--fg);background:var(--panel2)} nav.pages a:hover{color:var(--fg)}
+  header .right{margin-left:auto;display:flex;gap:10px;align-items:center;color:var(--dim);font-size:12px}
+  select{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12.5px}
+  main{padding:16px 22px;max-width:1400px;margin:0 auto}
+  .controls{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+  .seg{display:flex;gap:4px}
+  .seg button{background:var(--panel);color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:4px 11px;font:inherit;font-size:12.5px;cursor:pointer}
+  .seg button.on,.seg button[aria-pressed="true"]{color:var(--fg);background:var(--panel2);border-color:var(--accent)}
+  .wrap{display:grid;grid-template-columns:minmax(0,620px) minmax(0,1fr);gap:16px;align-items:start}
+  @media (max-width:1000px){.wrap{grid-template-columns:minmax(0,1fr)}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:14px;min-width:0;overflow-x:auto}
+  .panel h2{font-size:13px;margin:0 0 8px;font-weight:600;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+  .panel h2 .hint{color:var(--dim);font-weight:400;font-size:11.5px}
+  #sky svg{display:block;width:100%;height:auto}
+  svg text.ax{fill:var(--dim);font-size:12px}
+  svg text.sl{fill:var(--sat);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;paint-order:stroke;stroke:#0e1116;stroke-width:3px}
+  .legend{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:12px;margin-top:6px}
+  .legend .bar{flex:1;height:10px;border-radius:5px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 13px}
+  .card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  .card .v{font-size:20px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+  .card .v small{font-size:12px;color:var(--dim);font-weight:400}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #1b2129;vertical-align:middle}
+  th{color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+  td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .dim{color:var(--dim)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle;background:var(--dim)}
+  .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}
+  .bar2{height:7px;border-radius:4px;background:var(--accent);display:inline-block;vertical-align:middle}
+  .note{color:var(--dim);font-size:12.5px;line-height:1.55}
+  .note b{color:var(--fg)}
+  .warnc{color:var(--warn)}
+  .empty{color:var(--dim);padding:40px 10px;text-align:center}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <h1>MEOSAR Observatory<span id="station"></span></h1>
+  <nav class="pages"><a href="./">Tables</a><a href="globe">Globe</a><a href="coverage" class="on">Coverage</a></nav>
+  <span class="sub">where in the sky this station hears the SAR satellites</span>
+  <span class="right">
+    <label>Window <select id="hours">
+      <option value="6">6 hours</option><option value="24" selected>24 hours</option>
+      <option value="72">3 days</option><option value="168">7 days</option><option value="720">30 days</option><option value="0">everything</option>
+    </select></label>
+    <span id="status">loading…</span>
+  </span>
+</header>
+<main>
+  <div class="controls">
+    <div class="seg" id="mode" role="group" aria-label="Colour by">
+      <button data-m="rate" class="on">Hear rate</button><button data-m="eb">Eb/N0</button><button data-m="n">Copies heard</button></div>
+    <div class="seg"><button id="tracks" aria-pressed="true" title="The SAR satellites up now, and their tracks from an hour ago to three hours ahead">Satellites now</button></div>
+  </div>
+  <div class="wrap">
+    <div class="panel"><div id="sky"></div>
+      <div class="legend"><span id="lo"></span><div class="bar" id="bar"></div><span id="hi"></span></div>
+    </div>
+    <div>
+      <div class="cards" id="cards"></div>
+      <div class="panel"><h2>SAR satellites <span class="hint" id="sathint"></span></h2><div id="sats"></div></div>
+    </div>
+  </div>
+  <div class="panel note">
+    <b>Reading the plot:</b> the station's sky seen from above, north at the top, east to the right, the
+    horizon at the rim and straight up at the centre. Each burst the rollup matched to its satellites
+    is checked against every SAR satellite that could have relayed it: above <span id="minel"></span>° at the
+    station, and high enough above the beacon. Each of those is an expected copy, counted where that
+    satellite was in the station's sky; the copies the station actually decoded are the heard ones.
+    <b>Hear rate</b> is heard over expected. It is never near 100%: a beacon's burst reaches six to eight
+    satellites, and only the strongest copies decode. So read the plot for where the station hears
+    <i>better or worse</i>. Grey cells have fewer than <span id="mincell"></span> expected copies so far.
+    The <span class="warnc">dashed line</span> is the effective horizon: in each direction, the lowest cell
+    that hears at least half as well as the station's typical cell above 30°. Trees, roofs and the mounting
+    show as a horizon that rises. <b>Satellites now</b> draws the SAR satellites in the station's sky, with
+    their tracks from an hour ago (dotted) to three hours ahead. Only bursts from beacons that report their
+    own position can be matched to satellites, so the plot fills in over a day or more.
+  </div>
+</main>
+<script>
+const STATION = "__STATION__";
+const NS = "http://www.w3.org/2000/svg", $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let MODE = "rate", D = null, showTracks = true;
+try { const h = localStorage.getItem("meosar.hours"); if (h !== null && [...$("hours").options].some(o => o.value === h)) $("hours").value = h; } catch (e) {}
+try { showTracks = localStorage.getItem("meosar.cov.tracks") !== "0"; } catch (e) {}
+$("tracks").setAttribute("aria-pressed", String(showTracks));
+if (STATION) { $("station").textContent = " · " + STATION; document.title = "MEOSAR Coverage · " + STATION; }
+
+const VIR = [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]];
+function vir(t) { t = Math.max(0, Math.min(1, t)); const x = t * 4, i = Math.min(3, Math.floor(x)), f = x - i, a = VIR[i], b = VIR[i + 1];
+  return "rgb(" + a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(",") + ")"; }
+function el(tag, attrs, txt) { const e = document.createElementNS(NS, tag);
+  for (const k in attrs) if (attrs[k] != null) e.setAttribute(k, attrs[k]); if (txt != null) e.textContent = txt; return e; }
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+const pct = v => v == null ? "—" : Math.round(v * 100) + "%";
+const S = 600, R = 262, C = S / 2;
+function pt(az, e) { const r = R * (90 - e) / 90, a = az * Math.PI / 180; return [C + r * Math.sin(a), C - r * Math.cos(a)]; }
+function sector(az0, az1, e0, e1) { const r0 = R * (90 - e0) / 90, r1 = R * (90 - e1) / 90,
+  p1 = pt(az0, e0), p2 = pt(az1, e0), p3 = pt(az1, e1), p4 = pt(az0, e1), f = v => v.toFixed(1);
+  return "M" + f(p1[0]) + " " + f(p1[1]) + "A" + f(r0) + " " + f(r0) + " 0 0 1 " + f(p2[0]) + " " + f(p2[1]) +
+    "L" + f(p3[0]) + " " + f(p3[1]) + "A" + f(r1) + " " + f(r1) + " 0 0 0 " + f(p4[0]) + " " + f(p4[1]) + "Z"; }
+
+// The colour scale: hear rate from 0 to the best well-sampled cell; Eb/N0 and copies over their range.
+function scale(d) {
+  const ok = d.cells.filter(c => c.exp >= d.min_cell);
+  if (MODE === "rate") { const hi = Math.max(0.05, ...ok.map(c => c.rate)); return {lo: 0, hi, v: c => c.rate, lab: pct}; }
+  if (MODE === "eb") { const xs = ok.filter(c => c.eb != null).map(c => c.eb), lo = xs.length ? Math.min(...xs) : 0, hi = xs.length ? Math.max(...xs) : 1;
+    return {lo, hi: hi > lo ? hi : lo + 1, v: c => c.eb, lab: v => v.toFixed(1) + " dB"}; }
+  const xs = ok.filter(c => c.heard > 0).map(c => Math.log10(c.heard)), lo = xs.length ? Math.min(...xs) : 0, hi = xs.length ? Math.max(...xs) : 1;
+  return {lo, hi: hi > lo ? hi : lo + 1, v: c => c.heard > 0 ? Math.log10(c.heard) : null, lab: v => fmt(Math.round(10 ** v))};
+}
+
+function draw() {
+  const d = D, host = $("sky");
+  host.innerHTML = "";
+  const svg = el("svg", {viewBox: `0 0 ${S} ${S}`, role: "img", "aria-label": "Sky coverage plot"});
+  host.appendChild(svg);
+  svg.appendChild(el("circle", {cx: C, cy: C, r: R, fill: "var(--bg)", stroke: "var(--line)"}));
+  const sc = scale(d);
+  for (const c of d.cells) {
+    const az0 = c.az * d.az_step, e0 = c.el * d.el_step, v = sc.v(c), sparse = c.exp < d.min_cell || v == null;
+    const p = el("path", {d: sector(az0, az0 + d.az_step, e0, Math.min(90, e0 + d.el_step)),
+      fill: sparse ? "var(--grid)" : vir((v - sc.lo) / (sc.hi - sc.lo)), stroke: "var(--bg)", "stroke-width": 0.6, "fill-opacity": sparse ? 0.7 : 1});
+    p.appendChild(el("title", null, `azimuth ${az0}–${az0 + d.az_step}°, elevation ${e0}–${e0 + d.el_step}°\n` +
+      `${c.heard} of ${c.exp} expected copies heard (${pct(c.rate)})` + (c.eb != null ? `\nmean Eb/N0 ${c.eb} dB` : "") +
+      `\n${c.sats} satellite${c.sats === 1 ? "" : "s"}` + (c.exp < d.min_cell ? "\ntoo few copies to judge yet" : "")));
+    svg.appendChild(p);
+  }
+  // Below the lowest elevation attribution places a copy: hatched out.
+  svg.appendChild(el("circle", {cx: C, cy: C, r: R * (90 - d.min_el / 2) / 90, fill: "none", stroke: "#2b333d", "stroke-width": R * d.min_el / 90, "stroke-opacity": 0.6}));
+  [0, 30, 60].forEach(e => { svg.appendChild(el("circle", {cx: C, cy: C, r: R * (90 - e) / 90, fill: "none", stroke: "var(--dim)", "stroke-opacity": 0.35, "stroke-dasharray": e ? "2 4" : null}));
+    if (e) svg.appendChild(el("text", {x: C + 4, y: C - R * (90 - e) / 90 - 4, class: "ax"}, e + "°")); });
+  for (let a = 0; a < 360; a += 30) { const p = pt(a, 0); svg.appendChild(el("line", {x1: C, y1: C, x2: p[0], y2: p[1], stroke: "var(--dim)", "stroke-opacity": 0.2})); }
+  [["N", 0], ["E", 90], ["S", 180], ["W", 270]].forEach(([n, a]) => { const p = pt(a, -7);
+    svg.appendChild(el("text", {x: p[0], y: p[1] + 4, "text-anchor": "middle", class: "ax", "font-weight": 600}, n)); });
+  // The effective horizon.
+  let seg = []; const segs = [];
+  d.horizon.forEach((h, i) => { if (h == null) { if (seg.length) segs.push(seg); seg = []; return; } seg.push(pt(i * d.az_step + d.az_step / 2, h)); });
+  if (seg.length) segs.push(seg);
+  for (const s of segs) if (s.length > 1) svg.appendChild(el("polyline", {points: s.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" "),
+    fill: "none", stroke: "var(--warn)", "stroke-width": 2, "stroke-dasharray": "6 4"}));
+  // The SAR satellites now, with their tracks: dotted behind, solid ahead.
+  if (showTracks) {
+    const now = Math.round(d.track.back_s / d.track.step_s);
+    for (const x of d.sats) {
+      const runs = [[], []];   // past, future
+      const flush = (k, out) => { if (runs[k].length > 1) out.push([k, runs[k]]); runs[k] = []; };
+      const lines = [];
+      x.track.forEach((p, i) => {
+        if (!p) { flush(0, lines); flush(1, lines); return; }
+        const q = pt(p[0], p[1]);
+        if (i <= now) runs[0].push(q);
+        if (i >= now) runs[1].push(q);
+      });
+      flush(0, lines); flush(1, lines);
+      for (const [k, pts] of lines) svg.appendChild(el("polyline", {points: pts.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" "),
+        fill: "none", stroke: "var(--sat)", "stroke-width": k ? 1.4 : 1, "stroke-opacity": k ? 0.75 : 0.45, "stroke-dasharray": k ? null : "2 3"}));
+      if (x.now && x.now.el >= 0) {
+        const p = pt(x.now.az, x.now.el), g = el("g", null);
+        g.appendChild(el("rect", {x: p[0] - 4.5, y: p[1] - 4.5, width: 9, height: 9, fill: "var(--sat)", stroke: "#0e1116"}));
+        // Labels on the right half go to the left of the marker, so the rim doesn't cut them off.
+        const left = p[0] > C + R * 0.45;
+        g.appendChild(el("text", {x: p[0] + (left ? -8 : 8), y: p[1] + 4, class: "sl", "text-anchor": left ? "end" : "start"}, x.sat));
+        g.appendChild(el("title", null, `${x.sat}${x.alias ? " (" + x.alias + ")" : ""} · ${x.constellation}\nnow ${x.now.el.toFixed(0)}° elevation, ${Math.round(x.now.az)}° azimuth` +
+          (x.exp ? `\n${x.heard} of ${x.exp} expected copies heard (${pct(x.rate)}) in this window` : "")));
+        svg.appendChild(g);
+      }
+    }
+  }
+  $("bar").style.background = "linear-gradient(90deg," + [0, .25, .5, .75, 1].map(vir).join(",") + ")";
+  $("lo").textContent = sc.lab(sc.lo);
+  $("hi").textContent = sc.lab(sc.hi);
+  $("mincell").textContent = d.min_cell;
+  $("minel").textContent = d.min_el;
+}
+
+const card = (k, v, sub) => `<div class="card"><div class="k">${k}</div><div class="v">${v}${sub ? ` <small>${sub}</small>` : ""}</div></div>`;
+function side() {
+  const d = D, T = d.totals, shown = d.cells.filter(c => c.exp >= d.min_cell).length, up = d.sats.filter(x => x.now && x.now.el >= d.min_el);
+  $("cards").innerHTML =
+    card("Copies heard", fmt(T.heard), T.exp ? `of ${fmt(T.exp)} expected · ${pct(T.heard / T.exp)}` : "") +
+    card("Sky cells", shown, "with enough copies") +
+    card("SAR satellites up", up.length, `above ${d.min_el}° now`) +
+    card("Data since", d.first_data ? new Date(d.first_data * 1000).toISOString().slice(0, 10) : "—", "");
+  const L = d.sats;
+  $("sathint").textContent = "in the station's sky now or within the tracks' span · hear rate in this window";
+  if (!L.length) { $("sats").innerHTML = `<p class="dim">None to show.</p>`; return; }
+  const maxr = Math.max(0.05, ...L.map(x => x.rate || 0));
+  $("sats").innerHTML = `<table><tr><th>Satellite</th><th>Constellation</th><th>Now</th><th>Hear rate</th><th class="r">Copies</th><th class="r">Eb/N0</th></tr>` +
+    L.map(x => `<tr><td class="mono">${esc(x.sat)} <span class="dim">${esc(x.alias)}</span></td><td>${esc(x.constellation)}</td>` +
+      `<td>${!x.now ? "—" : x.now.el >= d.min_el ? `<span class="dot ok"></span>${x.now.el.toFixed(0)}° el · ${Math.round(x.now.az)}° az` :
+        x.now.el >= 0 ? `<span class="dot warn"></span>${x.now.el.toFixed(0)}° el` : `<span class="dim">below the horizon</span>`}</td>` +
+      `<td>${x.exp ? `<span class="bar2" style="width:${Math.max(2, (x.rate || 0) / maxr * 90)}px"></span> <span class="dim">${pct(x.rate)}</span>` : `<span class="dim">—</span>`}</td>` +
+      `<td class="r dim">${x.exp ? `${fmt(x.heard)} / ${fmt(x.exp)}` : ""}</td><td class="r">${x.eb == null ? "—" : x.eb.toFixed(1) + " dB"}</td></tr>`).join("") + "</table>";
+}
+
+async function load() {
+  try {
+    D = await (await fetch("api/coverage?hours=" + $("hours").value, {cache: "no-store"})).json();
+  } catch (e) { $("status").textContent = "cannot reach the station"; return; }
+  if (D.error || D.empty) { $("sky").innerHTML = `<div class="empty">No data yet: waiting for the receiver and the rollup.</div>`; $("status").textContent = ""; return; }
+  if (!D.station) { $("sky").innerHTML = `<div class="empty">No station position is set, so there is no sky to draw. Run ./install.sh --reconfigure and enter the station's LAT,LON.</div>`; $("status").textContent = ""; return; }
+  draw(); side();
+  if (!D.tles) $("status").textContent = "no satellite orbit data (TLEs) yet";
+  else $("status").textContent = D.cells.length ? `updated ${new Date().toISOString().slice(11, 16)} UTC` : "no coverage counted yet: it comes with satellite-matched bursts";
+}
+$("mode").onclick = e => { const b = e.target.closest("button"); if (!b) return; MODE = b.dataset.m;
+  [...b.parentNode.children].forEach(x => x.classList.toggle("on", x === b)); if (D && D.cells) draw(); };
+$("tracks").onclick = () => { showTracks = !showTracks; $("tracks").setAttribute("aria-pressed", String(showTracks));
+  try { localStorage.setItem("meosar.cov.tracks", showTracks ? "1" : "0"); } catch (e) {} if (D && D.cells) draw(); };
+$("hours").onchange = () => { try { localStorage.setItem("meosar.hours", $("hours").value); } catch (e) {} load(); };
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

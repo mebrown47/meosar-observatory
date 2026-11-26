@@ -56,6 +56,7 @@ import time
 from datetime import datetime
 
 import satattr
+import skycov
 
 SCHEMA_VERSION = 4
 GROUP_S = 1.5
@@ -639,7 +640,9 @@ def main():
     except ValueError:
         print(f"rollup: --where {a.where!r} is not LAT,LON: no satellite attribution", file=sys.stderr)
         where = None
-    sat = satattr.run(con, where, a.tle_dir or os.path.join(os.path.dirname(os.path.abspath(a.db)), "tle"), a.verbose)
+    tle_dir = a.tle_dir or os.path.join(os.path.dirname(os.path.abspath(a.db)), "tle")
+    sat = satattr.run(con, where, tle_dir, a.verbose)
+    skycov.run(con, where, tle_dir, a.verbose)
     con.execute("INSERT INTO meta(key,value) VALUES('last_run',?) ON CONFLICT(key) DO UPDATE SET "
                 "value=excluded.value", (str(int(time.time())),))
     con.execute("INSERT INTO meta(key,value) VALUES('dec406',?) ON CONFLICT(key) DO UPDATE SET "

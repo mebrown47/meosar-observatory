@@ -338,11 +338,13 @@ def store(con, gen, burst, bid, t, band, copies, cand, state, best=None, second=
                          round(la, 3), round(lo, 3), round(h), gen, burst, key))
         sats = ",".join(names)
         margin = (second[0] - chi) if second else None
-        con.execute("INSERT OR REPLACE INTO attr VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        con.execute("INSERT OR REPLACE INTO attr(gen, burst, bid, t, band, n, state, chi_f, chi_t, margin, f0, sats) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (gen, burst, bid, t, band, n, state, round(cf, 2), round(ct, 2),
                      None if margin is None else round(min(margin, 1e6), 1), round(f0 if f0 is not None else mf, 1), sats))
     else:
-        con.execute("INSERT OR REPLACE INTO attr VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        con.execute("INSERT OR REPLACE INTO attr(gen, burst, bid, t, band, n, state, chi_f, chi_t, margin, f0, sats) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (gen, burst, bid, t, band, n, state, None, None, None, None, ""))
 
 

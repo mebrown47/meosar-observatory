@@ -465,7 +465,7 @@ info "Installing program files to $PREFIX"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/bin" "$STAGE/observatory"
 cp "$BIN" "$BUILD_DIR/dec406_hex" "$STAGE/bin/"
-cp "$REPO_ROOT"/observatory/{rollup.py,satattr.py,geoloc.py,server.py,page.html,globe.html} "$STAGE/observatory/"
+cp "$REPO_ROOT"/observatory/{rollup.py,satattr.py,skycov.py,geoloc.py,server.py,page.html,globe.html,coverage.html} "$STAGE/observatory/"
 cp -r "$REPO_ROOT"/observatory/static "$STAGE/observatory/"   # the globe's script and vendored assets
 cat > "$STAGE/bin/meosar-tidy" <<'EOF'
 #!/bin/sh

@@ -26,6 +26,7 @@ import glob
 import json
 import os
 import sqlite3
+import statistics
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -340,6 +341,95 @@ def build_map(db, hours, where):
             "positions": ov["positions"]}
 
 
+# ---------- Coverage page: where in the sky the station hears the SAR satellites (skycov.py) ----------
+
+COV_MIN_CELL = 20       # expected copies a cell needs before its hear rate is shown
+TRACK_BACK_S, TRACK_AHEAD_S, TRACK_STEP_S = 3600, 3 * 3600, 300
+_tles = {"t": 0, "dir": None, "obj": None}
+
+
+def tles_for(db_path):
+    """The TLE snapshots beside the database, reread every 10 minutes."""
+    import satattr as SA
+    d = os.path.join(os.path.dirname(os.path.abspath(db_path)), "tle")
+    if _tles["dir"] != d or time.time() - _tles["t"] > 600:
+        _tles.update(t=time.time(), dir=d, obj=SA.Tles(d) if SA.Satrec is not None else None)
+    return SA, _tles["obj"]
+
+
+def build_coverage(db, hours, where):
+    hours = int(hours or 24)
+    con = connect_ro(db)
+    try:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='cov_hourly'").fetchone() is None:
+            rows, first, sar = [], None, set()
+        else:
+            since = int(time.time()) // 3600 * 3600 - (hours - 1) * 3600 if hours > 0 else 0
+            rows = con.execute("SELECT az, el, sat, SUM(exp), SUM(heard), SUM(eb_sum), SUM(eb_n) FROM cov_hourly "
+                               "WHERE hour>=? GROUP BY az, el, sat", (since,)).fetchall()
+            first = con.execute("SELECT MIN(hour) FROM cov_hourly").fetchone()[0]
+            import skycov
+            sar = skycov.sar_sats(con)
+    finally:
+        con.close()
+    cells, per_sat = {}, {}
+    for az, el, sat, n, h, es, en in rows:
+        c = cells.setdefault((az, el), [0, 0, 0.0, 0, set()])
+        c[0] += n; c[1] += h; c[2] += es or 0; c[3] += en or 0; c[4].add(sat)
+        p = per_sat.setdefault(sat, [0, 0, 0.0, 0])
+        p[0] += n; p[1] += h; p[2] += es or 0; p[3] += en or 0
+    out_cells = [{"az": az, "el": el, "exp": n, "heard": h, "rate": round(h / n, 4) if n else None,
+                  "eb": round(es / en, 1) if en else None, "sats": len(ss)} for (az, el), (n, h, es, en, ss) in cells.items()]
+    # The effective horizon: per azimuth, the lowest cell that hears at least half as well as the
+    # station's typical cell high in the sky (a share of copies, which depends on the decoder too).
+    high = [c["rate"] for c in out_cells if c["exp"] >= COV_MIN_CELL and c["el"] * 5 >= 30]
+    ref = statistics.median(high) if high else None
+    grid = {(c["az"], c["el"]): c for c in out_cells}
+    horizon = []
+    for a in range(36):
+        h = None
+        if ref:
+            for e in range(18):
+                c = grid.get((a, e))
+                if c and c["exp"] >= COV_MIN_CELL and c["rate"] >= ref / 2:
+                    h = e * 5
+                    break
+        horizon.append(h)
+    # The SAR satellites now, and their tracks across the station's sky.
+    sats = []
+    SA, tles = tles_for(db)
+    now = time.time()
+    if tles and tles.snaps and where:
+        station = SA.ecef(where["lat"], where["lon"], 0.1)
+        for band, lst in tles.latest().items():
+            for label, name, sat in lst:
+                if label not in sar:
+                    continue
+                track, cur = [], None
+                for t in range(int(now - TRACK_BACK_S), int(now + TRACK_AHEAD_S) + 1, TRACK_STEP_S):
+                    st = SA.sat_state(sat, t)
+                    if st is None:
+                        track.append(None); continue
+                    el = SA.look(st[0], st[1], station)[2]
+                    track.append([round(SA.azimuth(st[0], station), 1), round(el, 1)] if el >= 0 else None)
+                st = SA.sat_state(sat, now)
+                if st is not None:
+                    cur = {"az": round(SA.azimuth(st[0], station), 1), "el": round(SA.look(st[0], st[1], station)[2], 1)}
+                if cur is None and not any(track):
+                    continue
+                m = __import__("re").search(r"\(([^)]+)\)", name or "")
+                p = per_sat.get(label, [0, 0, 0.0, 0])
+                sats.append({"sat": label, "alias": m.group(1) if m else "", "constellation": "Galileo" if band == "galileo" else "GLONASS",
+                             "now": cur, "track": track, "exp": p[0], "heard": p[1],
+                             "rate": round(p[1] / p[0], 4) if p[0] else None, "eb": round(p[2] / p[3], 1) if p[3] else None})
+    sats.sort(key=lambda x: -(x["now"]["el"] if x["now"] else -99))
+    return {"generated": now, "hours": hours, "first_data": first, "az_step": 10, "el_step": 5, "min_el": 5,
+            "min_cell": COV_MIN_CELL, "cells": out_cells, "horizon": horizon, "ref_rate": ref,
+            "totals": {"exp": sum(c["exp"] for c in out_cells), "heard": sum(c["heard"] for c in out_cells)},
+            "track": {"back_s": TRACK_BACK_S, "ahead_s": TRACK_AHEAD_S, "step_s": TRACK_STEP_S},
+            "sats": sats, "station": where is not None, "tles": bool(tles and tles.snaps)}
+
+
 STATIC_TYPES = {".js": "text/javascript", ".json": "application/json", ".jpg": "image/jpeg", ".css": "text/css",
                 ".md": "text/plain; charset=utf-8", "": "text/plain; charset=utf-8"}
 
@@ -376,8 +466,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         arg = lambda k: (q.get(k, [None])[0] or None)
-        if u.path in ("/", "/index.html", "/globe"):
-            name = "globe.html" if u.path == "/globe" else "page.html"
+        if u.path in ("/", "/index.html", "/globe", "/coverage"):
+            name = {"/globe": "globe.html", "/coverage": "coverage.html"}.get(u.path, "page.html")
             with open(os.path.join(HERE, name), encoding="utf-8") as f:
                 self._send(200, f.read().replace("__STATION__", self.station), "text/html; charset=utf-8")
         elif u.path.startswith("/static/"):
@@ -394,6 +484,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, STATIC_TYPES.get(ext, "application/octet-stream"), cache)
         elif u.path == "/api/map":
             self._json(build_map, self.db_path, arg("hours"), self.where)
+        elif u.path == "/api/coverage":
+            self._json(build_coverage, self.db_path, arg("hours"), self.where)
         elif u.path == "/api/overview":
             self._json(build_overview, self.db_path, arg("hours"), self.where)
         elif u.path == "/api/beacon":
